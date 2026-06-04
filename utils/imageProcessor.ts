@@ -1,0 +1,390 @@
+import type { ColorEntry, PixelGrid } from '../types'
+
+/**
+ * 图片转换 + 颜色匹配（PRD §F2 算法，严格实现）
+ *
+ * 质量红线：颜色匹配必须使用感知加权距离公式，禁止使用简单欧氏距离。
+ *
+ *   ΔR = R1-R2, ΔG = G1-G2, ΔB = B1-B2
+ *   Rm = (R1+R2)/2
+ *   distance = √[(2 + Rm/256)·ΔR² + 4·ΔG² + (2 + (255-Rm)/256)·ΔB²]
+ *
+ * 比较「最近色」时直接比较被开方的量（radicand）即可，等价且省去 sqrt。
+ */
+
+const ALPHA_THRESHOLD = 64 // alpha < 64 判定为空白格（null）
+const COLS_MIN = 8
+const COLS_MAX = 256 // 主转换/空白/编辑器上限（成品转图纸单独传 maxDim=128）
+
+type RGB = { r: number; g: number; b: number }
+type PaletteRGB = { hex: string; r: number; g: number; b: number }
+
+// ---------- 基础颜色工具 ----------
+
+export function hexToRgb(hex: string): RGB {
+  const h = hex.replace('#', '')
+  return {
+    r: parseInt(h.slice(0, 2), 16),
+    g: parseInt(h.slice(2, 4), 16),
+    b: parseInt(h.slice(4, 6), 16),
+  }
+}
+
+export function rgbToHex(r: number, g: number, b: number): string {
+  const c = (n: number) => Math.max(0, Math.min(255, Math.round(n))).toString(16).padStart(2, '0')
+  return `#${c(r)}${c(g)}${c(b)}`.toUpperCase()
+}
+
+/** 感知加权颜色距离的平方（用于比较最近色） */
+export function perceptualDistSq(
+  r1: number,
+  g1: number,
+  b1: number,
+  r2: number,
+  g2: number,
+  b2: number,
+): number {
+  const rmean = (r1 + r2) / 2
+  const dr = r1 - r2
+  const dg = g1 - g2
+  const db = b1 - b2
+  return (2 + rmean / 256) * dr * dr + 4 * dg * dg + (2 + (255 - rmean) / 256) * db * db
+}
+
+// 缓存调色板的 RGB 解析结果，避免逐像素重复解析 hex
+const paletteCache = new WeakMap<ColorEntry[], PaletteRGB[]>()
+
+function getPaletteRGB(palette: ColorEntry[]): PaletteRGB[] {
+  let cached = paletteCache.get(palette)
+  if (!cached) {
+    cached = palette.map((c) => ({ hex: c.hex.toUpperCase(), ...hexToRgb(c.hex) }))
+    paletteCache.set(palette, cached)
+  }
+  return cached
+}
+
+function nearestInPalette(r: number, g: number, b: number, pal: PaletteRGB[]): string {
+  let best = pal[0].hex
+  let bestD = Infinity
+  for (let i = 0; i < pal.length; i++) {
+    const p = pal[i]
+    const d = perceptualDistSq(r, g, b, p.r, p.g, p.b)
+    if (d < bestD) {
+      bestD = d
+      best = p.hex
+    }
+  }
+  return best
+}
+
+/** 将任意 RGB snap 到最近的 Artkal 标准色，返回其 hex（PRD §8.3 接口） */
+export function snapToArtkal(r: number, g: number, b: number, palette: ColorEntry[]): string {
+  return nearestInPalette(r, g, b, getPaletteRGB(palette))
+}
+
+// ---------- 推荐格数 ----------
+
+/** 根据图片比例推荐格数：较短边默认 32 格，宽高保持比例并夹在 [8, maxDim]（成品转图纸传 maxDim=128） */
+export function recommendDimensions(
+  imgW: number,
+  imgH: number,
+  shortSide = 32,
+  maxDim = COLS_MAX,
+): { cols: number; rows: number } {
+  if (imgW <= 0 || imgH <= 0) return { cols: shortSide, rows: shortSide }
+  let cols: number
+  let rows: number
+  if (imgW <= imgH) {
+    cols = shortSide
+    rows = Math.round(shortSide * (imgH / imgW))
+  } else {
+    rows = shortSide
+    cols = Math.round(shortSide * (imgW / imgH))
+  }
+  // 极端比例下若长边超出上限，按比例整体缩小，保持原图宽高比不被拉伸
+  const longest = Math.max(cols, rows)
+  if (longest > maxDim) {
+    const f = maxDim / longest
+    cols = Math.round(cols * f)
+    rows = Math.round(rows * f)
+  }
+  const clamp = (n: number) => Math.max(COLS_MIN, Math.min(maxDim, Math.round(n)))
+  return { cols: clamp(cols), rows: clamp(rows) }
+}
+
+export function clampGrid(n: number): number {
+  return Math.max(COLS_MIN, Math.min(COLS_MAX, Math.round(n)))
+}
+
+// ---------- 加载图片 ----------
+
+/** 将 base64 / dataURL 加载为 HTMLImageElement */
+export function loadImage(src: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const img = new Image()
+    img.onload = () => resolve(img)
+    img.onerror = () => reject(new Error('图片加载失败'))
+    img.src = src
+  })
+}
+
+// ---------- 色彩增强（让结果更鲜艳，对抗照片偏灰/偏暗导致 snap 后发闷） ----------
+
+/**
+ * 就地增强像素的对比度 + 饱和度（snap 到 Artkal 前做）。
+ * 照片（尤其成品拼豆俯拍）常偏灰偏暗，直接 snap 会落到发闷的色号；
+ * 适度提对比 + 提饱和后，能映射到更鲜亮的 Artkal 色，成品更好看。
+ * 默认强度温和，避免把本就鲜艳的图过曝。
+ */
+export function enhancePixels(data: Uint8ClampedArray, saturation = 1.32, contrast = 1.12): void {
+  for (let i = 0; i < data.length; i += 4) {
+    if (data[i + 3] < ALPHA_THRESHOLD) continue // 跳过透明像素
+    let r = (data[i] - 128) * contrast + 128
+    let g = (data[i + 1] - 128) * contrast + 128
+    let b = (data[i + 2] - 128) * contrast + 128
+    const luma = 0.299 * r + 0.587 * g + 0.114 * b // 向亮度灰拉伸 = 调饱和
+    r = luma + (r - luma) * saturation
+    g = luma + (g - luma) * saturation
+    b = luma + (b - luma) * saturation
+    data[i] = r < 0 ? 0 : r > 255 ? 255 : r
+    data[i + 1] = g < 0 ? 0 : g > 255 ? 255 : g
+    data[i + 2] = b < 0 ? 0 : b > 255 ? 255 : b
+  }
+}
+
+// ---------- 中值滤波（降噪：去噪同时保留边缘，不会误删眼睛等小细节） ----------
+
+// 缓存「源图 → 中值滤波结果」（按 img 对象，WeakMap 自动回收）。源图变化即换新 img → 自动失效；
+// 拖动格数滑块时 img 不变 → 复用缓存，不重复对数十万像素排序，避免卡顿。
+const medianCache = new WeakMap<HTMLImageElement, ImageData>()
+
+/**
+ * 3×3 中值滤波，作用于源图 ImageData（在缩放为目标格数之前调用）。
+ * 只处理 R/G/B、不动 alpha；保留边缘（眼睛/细线不会被当噪点删掉）。
+ */
+export function medianFilter(imageData: ImageData): ImageData {
+  const { width, height, data } = imageData
+  const out = new Uint8ClampedArray(data)
+  const vals = new Array<number>(9)
+  for (let y = 1; y < height - 1; y++) {
+    for (let x = 1; x < width - 1; x++) {
+      for (let ch = 0; ch < 3; ch++) {
+        let k = 0
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            vals[k++] = data[((y + dy) * width + (x + dx)) * 4 + ch]
+          }
+        }
+        vals.sort((a, b) => a - b)
+        out[(y * width + x) * 4 + ch] = vals[4] // 中位数
+      }
+    }
+  }
+  return new ImageData(out, width, height)
+}
+
+// ---------- Step 1–3：缩放 + 提取 + snap ----------
+
+/**
+ * 图片 → 全保真 Artkal 像素网格（PRD §F2 Step 1–3）
+ * 此处不做颜色种数控制，种数控制交给 quantizeColors（Step 4）。
+ */
+export function convertImage(
+  img: HTMLImageElement,
+  cols: number,
+  rows: number,
+  palette: ColorEntry[],
+  denoise = false,
+  enhance = false,
+): PixelGrid {
+  const canvas = document.createElement('canvas')
+  canvas.width = cols
+  canvas.height = rows
+  const ctx = canvas.getContext('2d', { willReadFrequently: true })
+  if (!ctx) throw new Error('无法创建 Canvas 上下文')
+  ctx.imageSmoothingEnabled = true
+  ctx.imageSmoothingQuality = 'high'
+  ctx.clearRect(0, 0, cols, rows)
+
+  // Step 1：缩放到目标格数。
+  // - 降噪开启：先把源图绘到「封顶中间分辨率」画布 A → 3×3 中值滤波（去噪保边）→ 再缩放到目标格数。
+  //   （已删除原先的高斯模糊与转换后的孤立像素清除，避免削平/误删眼睛等小细节）
+  // - 降噪关闭：源图直接缩放到目标格数（最清晰）。
+  if (denoise && img.naturalWidth > 0) {
+    const maxInter = 600
+    const sa = Math.min(1, maxInter / Math.max(img.naturalWidth, img.naturalHeight))
+    const aw = Math.max(cols, Math.round(img.naturalWidth * sa))
+    const ah = Math.max(rows, Math.round(img.naturalHeight * sa))
+    const ca = document.createElement('canvas')
+    ca.width = aw
+    ca.height = ah
+    const cta = ca.getContext('2d', { willReadFrequently: true })
+    if (cta) {
+      cta.imageSmoothingEnabled = true
+      cta.imageSmoothingQuality = 'high'
+      cta.drawImage(img, 0, 0, aw, ah)
+      let filtered = medianCache.get(img)
+      if (!filtered || filtered.width !== aw || filtered.height !== ah) {
+        filtered = medianFilter(cta.getImageData(0, 0, aw, ah))
+        medianCache.set(img, filtered)
+      }
+      cta.putImageData(filtered, 0, 0) // 必须写回画布，否则滤波白做
+      ctx.drawImage(ca, 0, 0, cols, rows)
+    } else {
+      ctx.drawImage(img, 0, 0, cols, rows)
+    }
+  } else {
+    ctx.drawImage(img, 0, 0, cols, rows)
+  }
+
+  // Step 2：提取每像素 RGBA（可选：snap 前做色彩增强，让成品更鲜艳）
+  const { data } = ctx.getImageData(0, 0, cols, rows)
+  if (enhance) enhancePixels(data)
+  const pal = getPaletteRGB(palette)
+  const grid: PixelGrid = []
+
+  for (let y = 0; y < rows; y++) {
+    const row: (string | null)[] = []
+    for (let x = 0; x < cols; x++) {
+      const i = (y * cols + x) * 4
+      const a = data[i + 3]
+      if (a < ALPHA_THRESHOLD) {
+        row.push(null) // 空白格
+      } else {
+        // Step 3：感知加权距离匹配最近 Artkal 色
+        row.push(nearestInPalette(data[i], data[i + 1], data[i + 2], pal))
+      }
+    }
+    grid.push(row)
+  }
+  return grid
+}
+
+// ---------- Step 4：K-means 颜色种数控制 ----------
+
+/**
+ * 将已 snap 到 Artkal 的网格的颜色种数压缩到 targetCount（PRD §F2 Step 4）
+ * 使用「感知加权距离」的加权 K-means 对出现的颜色聚类，每个聚类中心再 snap 回最近 Artkal 标准色。
+ *
+ * 异常兜底：聚类失败 / 颜色本就不超标 → 直接返回原网格（PRD §11）。
+ */
+export function quantizeColors(
+  grid: PixelGrid,
+  targetCount: number,
+  palette: ColorEntry[],
+): PixelGrid {
+  try {
+    // 统计不同颜色及其频次
+    const freq = new Map<string, number>()
+    for (const row of grid) {
+      for (const cell of row) {
+        if (cell) freq.set(cell, (freq.get(cell) ?? 0) + 1)
+      }
+    }
+    const distinct = [...freq.keys()]
+    if (distinct.length <= targetCount) return grid // 未超标，无需聚类
+
+    const pal = getPaletteRGB(palette)
+    const points = distinct.map((hex) => ({ hex, ...hexToRgb(hex), w: freq.get(hex)! }))
+
+    // 确定性 k-means++ 初始化：先取最高频色，再迭代选「加权距离最远」的点
+    const k = Math.max(1, Math.min(targetCount, points.length))
+    const centroids: RGB[] = []
+    const seedSorted = [...points].sort((a, b) => b.w - a.w)
+    centroids.push({ r: seedSorted[0].r, g: seedSorted[0].g, b: seedSorted[0].b })
+    while (centroids.length < k) {
+      let far = points[0]
+      let farD = -1
+      for (const p of points) {
+        let nearest = Infinity
+        for (const c of centroids) {
+          const d = perceptualDistSq(p.r, p.g, p.b, c.r, c.g, c.b)
+          if (d < nearest) nearest = d
+        }
+        const score = nearest * p.w // 频次加权，倾向于覆盖高频颜色
+        if (score > farD) {
+          farD = score
+          far = p
+        }
+      }
+      centroids.push({ r: far.r, g: far.g, b: far.b })
+    }
+
+    // 迭代聚类（最多 16 轮，提前收敛则停止）
+    const assign = new Array<number>(points.length).fill(0)
+    for (let iter = 0; iter < 16; iter++) {
+      let changed = false
+      // 分配
+      for (let i = 0; i < points.length; i++) {
+        const p = points[i]
+        let best = 0
+        let bestD = Infinity
+        for (let c = 0; c < centroids.length; c++) {
+          const d = perceptualDistSq(p.r, p.g, p.b, centroids[c].r, centroids[c].g, centroids[c].b)
+          if (d < bestD) {
+            bestD = d
+            best = c
+          }
+        }
+        if (assign[i] !== best) {
+          assign[i] = best
+          changed = true
+        }
+      }
+      // 更新中心（频次加权平均）
+      const sum = centroids.map(() => ({ r: 0, g: 0, b: 0, w: 0 }))
+      for (let i = 0; i < points.length; i++) {
+        const p = points[i]
+        const s = sum[assign[i]]
+        s.r += p.r * p.w
+        s.g += p.g * p.w
+        s.b += p.b * p.w
+        s.w += p.w
+      }
+      for (let c = 0; c < centroids.length; c++) {
+        if (sum[c].w > 0) {
+          centroids[c] = { r: sum[c].r / sum[c].w, g: sum[c].g / sum[c].w, b: sum[c].b / sum[c].w }
+        }
+      }
+      if (!changed && iter > 0) break
+    }
+
+    // 每个原始颜色 → 其聚类中心 → snap 回最近 Artkal 标准色
+    const remap = new Map<string, string>()
+    for (let i = 0; i < points.length; i++) {
+      const c = centroids[assign[i]]
+      remap.set(points[i].hex, nearestInPalette(c.r, c.g, c.b, pal))
+    }
+
+    return grid.map((row) => row.map((cell) => (cell ? remap.get(cell) ?? cell : null)))
+  } catch {
+    // PRD §11：颜色数量聚类失败 → 回退到直接 snap 匹配，不报错
+    return grid
+  }
+}
+
+// ---------- 编排：图片 → 最终图纸 ----------
+// （原 cleanupIsolated「孤立像素清除」已删除：它把眼睛/细线等重要小细节当噪点误删，得不偿失。）
+
+/**
+ * 便捷编排：convertImage(Step1-3) → quantizeColors(Step4)，转换设置页 / AI 复用。
+ * denoise 开启时：缩放前对源图做 3×3 中值滤波（convertImage 内，去噪同时保留边缘）。
+ * 已移除原先「转换前高斯模糊 + 转换后孤立像素清除」——后者会把眼睛/细线当噪点误删。
+ */
+export function processImageToGrid(
+  img: HTMLImageElement,
+  cols: number,
+  rows: number,
+  colorCount: number,
+  palette: ColorEntry[],
+  denoise = false,
+  enhance = false,
+): PixelGrid {
+  const full = convertImage(img, cols, rows, palette, denoise, enhance)
+  return quantizeColors(full, colorCount, palette)
+}
+
+/** 判断网格是否全空（用于异常处理：图片全透明 / 转换后全空） */
+export function isGridEmpty(grid: PixelGrid): boolean {
+  return grid.every((row) => row.every((cell) => cell === null))
+}

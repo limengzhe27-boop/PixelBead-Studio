@@ -1,0 +1,219 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: light;
+  }
+
+  html,
+  body {
+    height: 100%;
+    /* 全局禁止横向滚动（响应式适配，避免溢出抖动） */
+    overflow-x: hidden;
+    max-width: 100%;
+  }
+
+  body {
+    @apply bg-paper-100 text-ink font-sans antialiased;
+    text-rendering: optimizeLegibility;
+    letter-spacing: 0.01em;
+  }
+
+  /* 手机端正文略放大，提升可读性（编辑器等用显式 px 的不受影响） */
+  @media (max-width: 767px) {
+    body {
+      font-size: 15px;
+    }
+  }
+
+  /* 中文标题用 Noto Sans SC 900（Bricolage 仅拉丁，故不全局套 display） */
+  h1,
+  h2,
+  h3 {
+    @apply font-sans;
+    font-weight: 900;
+    letter-spacing: -0.01em;
+  }
+
+  ::selection {
+    background: theme('colors.coral.DEFAULT');
+    color: #fff;
+  }
+
+  :focus-visible {
+    outline: 3px solid theme('colors.teal.DEFAULT');
+    outline-offset: 2px;
+  }
+}
+
+@layer components {
+  /* ── 半调网点氛围层（riso 错版双色点） ── */
+  .bg-pegboard {
+    background-image:
+      radial-gradient(rgba(26, 26, 26, 0.07) 1.3px, transparent 1.7px),
+      radial-gradient(rgba(255, 77, 109, 0.06) 1.3px, transparent 1.7px);
+    background-size: 18px 18px, 18px 18px;
+    background-position: 0 0, 9px 9px;
+  }
+  /* 编辑器画布底：更淡、纯中性（不带 spot，保证豆色判断） */
+  .bg-pegboard-fine {
+    background-image: radial-gradient(rgba(26, 26, 26, 0.045) 1px, transparent 1.4px);
+    background-size: 14px 14px;
+  }
+
+  /* 透明格棋盘（PNG/画布空白格底纹，如需） */
+  .bg-checker {
+    background-image: linear-gradient(45deg, #e7e1d2 25%, transparent 25%),
+      linear-gradient(-45deg, #e7e1d2 25%, transparent 25%),
+      linear-gradient(45deg, transparent 75%, #e7e1d2 75%),
+      linear-gradient(-45deg, transparent 75%, #e7e1d2 75%);
+    background-size: 16px 16px;
+    background-position: 0 0, 0 8px, 8px -8px, -8px 0px;
+    background-color: #f3efe6;
+  }
+
+  /* ── 按钮：可按压油印贴纸 ── */
+  .btn-cta {
+    @apply inline-flex items-center justify-center gap-2 rounded-[14px] border-2 border-ink bg-coral px-6 py-3 font-bold text-white shadow-sticker transition-all duration-150;
+  }
+  .btn-cta:hover:not(:disabled) {
+    @apply bg-coral-dark;
+    transform: translate(2px, 2px);
+    box-shadow: 1px 1px 0 #1a1a1a;
+  }
+  .btn-cta:active:not(:disabled) {
+    transform: translate(3px, 3px);
+    box-shadow: 0 0 0 #1a1a1a;
+  }
+  .btn-cta:disabled {
+    @apply cursor-not-allowed border-paper-300 bg-paper-200 text-ink-faint;
+    box-shadow: 3px 3px 0 theme('colors.paper.300');
+    transform: none;
+  }
+
+  .btn-ghost {
+    @apply inline-flex items-center justify-center gap-2 rounded-[14px] border-2 border-ink bg-paper-50 px-5 py-2.5 font-bold text-ink shadow-sticker-sm transition-all duration-150;
+  }
+  .btn-ghost:hover {
+    @apply bg-paper-100;
+    transform: translate(2px, 2px);
+    box-shadow: 0 0 0 #1a1a1a;
+  }
+  .btn-ghost:active {
+    transform: translate(2px, 2px);
+    box-shadow: 0 0 0 #1a1a1a;
+  }
+
+  /* ── 卡片 ── */
+  .card-riso {
+    @apply rounded-[20px] border-2 border-ink bg-paper-50 shadow-pop transition-all duration-200;
+  }
+  .card-soft {
+    @apply rounded-2xl border border-paper-300 bg-paper-50 shadow-soft;
+  }
+
+  /* ── 贴纸标签 ── */
+  .tag {
+    @apply inline-flex items-center gap-1.5 rounded-bead border-[1.5px] border-ink bg-paper-50 px-2.5 py-1 font-mono text-[11px] font-bold uppercase tracking-[0.12em];
+  }
+  .tag--pink {
+    @apply border-ink bg-coral text-white;
+  }
+  .tag--blue {
+    @apply border-ink bg-teal text-white;
+  }
+  .tag--yellow {
+    @apply border-ink bg-sun text-ink;
+  }
+
+  /* ── marker 高亮 & 错版投影 ── */
+  .hl {
+    position: relative;
+    white-space: nowrap;
+  }
+  .hl::after {
+    content: '';
+    position: absolute;
+    inset: 58% -0.12em 8% -0.12em;
+    background: theme('colors.coral.DEFAULT');
+    opacity: 0.5;
+    z-index: -1;
+    transform: rotate(-1.4deg);
+    border-radius: 3px;
+  }
+  .offset-ink {
+    text-shadow: 3px 3px 0 theme('colors.teal.DEFAULT'), 5px 5px 0 rgba(26, 26, 26, 0.1);
+  }
+
+  /* ── 链接 ── */
+  .link {
+    @apply text-teal no-underline;
+    background-image: linear-gradient(theme('colors.teal.DEFAULT'), theme('colors.teal.DEFAULT'));
+    background-size: 0% 2px;
+    background-position: 0 100%;
+    background-repeat: no-repeat;
+    transition: background-size 0.25s;
+  }
+  .link:hover {
+    background-size: 100% 2px;
+  }
+
+  /* ── 宣言横滚带 ── */
+  .marquee {
+    overflow: hidden;
+    border-top: 2px solid theme('colors.ink.DEFAULT');
+    border-bottom: 2px solid theme('colors.ink.DEFAULT');
+  }
+  .marquee__track {
+    display: inline-flex;
+    align-items: center;
+    gap: 2.5rem;
+    white-space: nowrap;
+    will-change: transform;
+  }
+  .marquee:hover .marquee__track {
+    animation-play-state: paused;
+  }
+}
+
+@layer utilities {
+  /* 触摸目标下限 44×44px（移动端可点击元素） */
+  .touch-target {
+    min-height: 44px;
+    min-width: 44px;
+  }
+
+  .scroll-thin::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  .scroll-thin::-webkit-scrollbar-thumb {
+    background: rgba(26, 26, 26, 0.22);
+    border-radius: 9999px;
+    border: 3px solid transparent;
+    background-clip: padding-box;
+  }
+  .scroll-thin::-webkit-scrollbar-thumb:hover {
+    background: rgba(26, 26, 26, 0.38);
+    background-clip: padding-box;
+  }
+  .scroll-thin::-webkit-scrollbar-track {
+    background: transparent;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+  .marquee__track {
+    animation: none !important;
+    transform: none !important;
+  }
+}
