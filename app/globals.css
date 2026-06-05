@@ -13,6 +13,8 @@
     /* 全局禁止横向滚动（响应式适配，避免溢出抖动） */
     overflow-x: hidden;
     max-width: 100%;
+    /* 阻止横向 overscroll 触发浏览器前进/后退、下拉刷新——画布缩放/平移横滑时尤其重要 */
+    overscroll-behavior: none;
   }
 
   body {

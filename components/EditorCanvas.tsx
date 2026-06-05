@@ -1,7 +1,20 @@
-import { useEffect, useRef } from 'react'
-import type { MouseEvent as ReactMouseEvent } from 'react'
+import { forwardRef, useEffect, useImperativeHandle, useRef } from 'react'
 import type { PixelGrid, ToolType } from '../types'
 import { renderGrid } from '../utils/canvasRenderer'
+
+/** 画布命令式接口：交互入口统一在编辑器页（Pointer Events），由它驱动这些方法绘制 */
+export interface EditorCanvasHandle {
+  /** 按下：按当前工具开始（画笔/橡皮进入拖拽；填充/取色/魔法橡皮=单击立即完成；逐行=选行） */
+  beginStroke: (clientX: number, clientY: number) => void
+  /** 拖动：画笔/橡皮沿途补点绘制（Bresenham 不断线） */
+  extendStroke: (clientX: number, clientY: number) => void
+  /** 抬起：提交一步历史 */
+  endStroke: () => void
+  /** 丢弃当前笔（如绘制中途第二指按下转缩放）：不提交、不记历史、恢复显示 */
+  cancelStroke: () => void
+  /** 是否正处于一笔绘制中 */
+  isDrawing: () => boolean
+}
 
 interface Props {
   pixels: PixelGrid // 已提交的像素（来自 context）
@@ -96,7 +109,7 @@ function floodFill(grid: PixelGrid, r: number, c: number, replacement: string | 
   }
 }
 
-export default function EditorCanvas({
+const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas({
   pixels,
   cellSize,
   showGrid,
@@ -111,7 +124,7 @@ export default function EditorCanvas({
   brushSize,
   completedRows,
   panMode,
-}: Props) {
+}: Props, ref) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const workRef = useRef<PixelGrid>(pixels)
   const drawingRef = useRef(false)
@@ -140,15 +153,15 @@ export default function EditorCanvas({
   }
 
   // 命中测试与渲染分辨率/缩放解耦：直接用显示矩形 + 网格行列数换算，放大/超采样都正确（不改高亮逻辑）
-  const cellFromEvent = (e: MouseEvent | ReactMouseEvent): [number, number] | null => {
+  const cellFrom = (clientX: number, clientY: number): [number, number] | null => {
     const canvas = canvasRef.current
     if (!canvas) return null
     const rect = canvas.getBoundingClientRect()
     const rows = workRef.current.length
     const cols = workRef.current[0]?.length ?? 0
     if (!rows || !cols || rect.width === 0 || rect.height === 0) return null
-    const c = Math.floor((e.clientX - rect.left) / (rect.width / cols))
-    const r = Math.floor((e.clientY - rect.top) / (rect.height / rows))
+    const c = Math.floor((clientX - rect.left) / (rect.width / cols))
+    const r = Math.floor((clientY - rect.top) / (rect.height / rows))
     if (r < 0 || c < 0 || r >= rows || c >= cols) return null
     return [r, c]
   }
@@ -170,10 +183,11 @@ export default function EditorCanvas({
     }
   }
 
-  const handleMouseDown = (e: ReactMouseEvent) => {
+  // —— 命令式绘制接口（交互入口在编辑器页的统一 Pointer 处理）——
+
+  const beginStroke = (clientX: number, clientY: number) => {
     if (cfg.current.panMode) return // 手型/空格 平移模式：不绘制，交给容器平移
-    if (e.button !== 0) return
-    const cell = cellFromEvent(e)
+    const cell = cellFrom(clientX, clientY)
     if (!cell) return
     const [r, c] = cell
 
@@ -210,23 +224,21 @@ export default function EditorCanvas({
       return
     }
 
-    // 画笔 / 橡皮：进入拖拽模式
+    // 画笔 / 橡皮：进入拖拽模式（即时绘制到 canvas，抬笔才提交）
     drawingRef.current = true
     lastCellRef.current = [r, c]
     paint(r, c)
     scheduleRender()
-    window.addEventListener('mousemove', handleWindowMove)
-    window.addEventListener('mouseup', handleWindowUp)
   }
 
-  const handleWindowMove = (e: MouseEvent) => {
+  const extendStroke = (clientX: number, clientY: number) => {
     if (!drawingRef.current) return
-    const cell = cellFromEvent(e)
+    const cell = cellFrom(clientX, clientY)
     if (!cell) return
     const [r, c] = cell
     const last = lastCellRef.current
     if (last && (last[0] !== r || last[1] !== c)) {
-      for (const [lr, lc] of lineCells(last[0], last[1], r, c)) paint(lr, lc)
+      for (const [lr, lc] of lineCells(last[0], last[1], r, c)) paint(lr, lc) // 两点补全，拖快不断线
     } else {
       paint(r, c)
     }
@@ -234,27 +246,45 @@ export default function EditorCanvas({
     scheduleRender()
   }
 
-  const handleWindowUp = () => {
-    if (!drawingRef.current) return
-    drawingRef.current = false
-    lastCellRef.current = null
-    window.removeEventListener('mousemove', handleWindowMove)
-    window.removeEventListener('mouseup', handleWindowUp)
+  const finishRaf = () => {
     if (rafRef.current != null) {
       cancelAnimationFrame(rafRef.current)
       rafRef.current = null
     }
+  }
+
+  const endStroke = () => {
+    if (!drawingRef.current) return
+    drawingRef.current = false
+    lastCellRef.current = null
+    finishRaf()
     cfg.current.onCommit(workRef.current) // 提交一步历史，同步 React state
   }
+
+  const cancelStroke = () => {
+    if (!drawingRef.current) return
+    drawingRef.current = false
+    lastCellRef.current = null
+    finishRaf()
+    // 丢弃本笔：恢复到已提交像素并重绘，不提交、不记历史
+    workRef.current = pixels
+    const canvas = canvasRef.current
+    if (canvas) drawEditor(canvas, pixels, { cellSize, showGrid, legendMap, completedRows, selectedRow })
+  }
+
+  useImperativeHandle(ref, () => ({
+    beginStroke,
+    extendStroke,
+    endStroke,
+    cancelStroke,
+    isDrawing: () => drawingRef.current,
+  }))
 
   // 卸载清理
   useEffect(() => {
     return () => {
-      window.removeEventListener('mousemove', handleWindowMove)
-      window.removeEventListener('mouseup', handleWindowUp)
       if (rafRef.current != null) cancelAnimationFrame(rafRef.current)
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   const cursor = panMode ? 'grab' : guideMode ? 'pointer' : tool === 'eyedropper' ? 'copy' : 'crosshair'
@@ -262,10 +292,11 @@ export default function EditorCanvas({
   return (
     <canvas
       ref={canvasRef}
-      onMouseDown={handleMouseDown}
       onContextMenu={(e) => e.preventDefault()}
       style={{ cursor, touchAction: 'none' }}
       className="block rounded-md shadow-craft"
     />
   )
-}
+})
+
+export default EditorCanvas

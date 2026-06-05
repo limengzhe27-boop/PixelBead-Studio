@@ -1,7 +1,6 @@
 'use client'
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { MouseEvent as ReactMouseEvent } from 'react'
 import { useRouter } from 'next/navigation'
 import { useProject } from '@/context/ProjectContext'
 import { useSettings } from '@/context/SettingsContext'
@@ -9,7 +8,7 @@ import Toolbar from '@/components/Toolbar'
 import ToolPanel from '@/components/ToolPanel'
 import PalettePanel from '@/components/PalettePanel'
 import LegendPanel from '@/components/LegendPanel'
-import EditorCanvas from '@/components/EditorCanvas'
+import EditorCanvas, { type EditorCanvasHandle } from '@/components/EditorCanvas'
 import ExportModal from '@/components/ExportModal'
 import RowGuideOverlay from '@/components/RowGuideOverlay'
 import ColorSubstituter from '@/components/ColorSubstituter'
@@ -67,11 +66,14 @@ export default function EditorPage() {
   const [recNotice, setRecNotice] = useState(false) // 来自「识别色号」的一次性提示
 
   const viewportRef = useRef<HTMLDivElement>(null)
+  const canvasApiRef = useRef<EditorCanvasHandle>(null)
   const scaleRef = useRef(1)
   const txRef = useRef(0)
   const tyRef = useRef(0)
   const spaceRef = useRef(false)
   const panModeRef = useRef(false)
+  // 当前「显示内容尺寸 + 视口尺寸」，供 setView 把平移夹在合法范围（防止画布被甩出屏外变空白）
+  const viewSizeRef = useRef({ cw: 0, ch: 0, vw: 0, vh: 0 })
 
   const pixels = state.pixels
   const legend = useMemo(() => buildLegend(pixels ?? [], palette), [pixels, palette])
@@ -160,14 +162,25 @@ export default function EditorPage() {
     }
   }, [dispatch])
 
-  // ===== 缩放 + 平移（模块2/3）：scale + translate，flex 居中，cellSize 固定 16 =====
+  // ===== 缩放 + 平移（模块2/3）：scale + translate，flex 居中 =====
+  // 防御：非法值(NaN/Inf)回退到上一个合法值；平移夹在合法范围，画布至少留一部分在视口内（不被甩出变空白）
   const setView = useCallback((s: number, tx: number, ty: number) => {
-    scaleRef.current = s
-    txRef.current = tx
-    tyRef.current = ty
-    setScale(s)
-    setTranslateX(tx)
-    setTranslateY(ty)
+    const safeS = Number.isFinite(s) ? s : scaleRef.current
+    let nx = Number.isFinite(tx) ? tx : txRef.current
+    let ny = Number.isFinite(ty) ? ty : tyRef.current
+    const { cw, ch, vw, vh } = viewSizeRef.current
+    if (vw > 0 && cw > 0) {
+      const maxX = (cw + vw) / 2 - 24 // 允许画布边缘移到视口中线附近，但不整体移出
+      const maxY = (ch + vh) / 2 - 24
+      nx = Math.max(-maxX, Math.min(maxX, nx))
+      ny = Math.max(-maxY, Math.min(maxY, ny))
+    }
+    scaleRef.current = safeS
+    txRef.current = nx
+    tyRef.current = ny
+    setScale(safeS)
+    setTranslateX(nx)
+    setTranslateY(ny)
   }, [])
 
   // 以 (mx,my) 为中心缩放：保持该点下的画布位置不动（transform-origin: center）
@@ -208,13 +221,26 @@ export default function EditorPage() {
     setView(s, 0, 0)
   }, [state.pixels, vpH, setView])
 
-  // 原生非 passive：双指/滚轮平移 · Ctrl⌘+滚轮 或 触控板捏合 缩放 + 触屏双指捏合 + 手型单指平移
+  // 统一交互入口（Pointer Events）：鼠标 / 触摸 / 触控笔走同一套，按「当前工具 + 按下手指数」三选一：
+  //   单指 + 绘制工具 = 绘制（交给画布命令式接口）；单指 + 手型 = 平移；双指 = 缩放（任意工具）。
+  //   绘制中途第二指按下 → 丢弃当前笔、转缩放。配合 touch-action:none / overscroll:none，避免横滑误触返回/翻页。
   useEffect(() => {
     const el = viewportRef.current
     if (!el) return
+
+    const pointers = new Map<number, { x: number; y: number }>()
+    let mode: 'idle' | 'draw' | 'pan' | 'zoom' = 'idle'
+    let panStart: { x: number; y: number; tx: number; ty: number } | null = null
+    let pinch: { dist: number; scale: number } | null = null
+    const two = () => {
+      const it = pointers.values()
+      const a = it.next().value as { x: number; y: number }
+      const b = it.next().value as { x: number; y: number }
+      return { a, b }
+    }
+
     const onWheel = (e: WheelEvent) => {
       e.preventDefault()
-      // deltaMode 归一：行模式(Firefox 鼠标)/页模式按像素换算，否则缩放/平移几乎不动
       const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? el.clientHeight || 800 : 1
       const dx = e.deltaX * unit
       const dy = e.deltaY * unit
@@ -222,45 +248,79 @@ export default function EditorPage() {
       if (e.ctrlKey || e.metaKey) zoomTo(scaleRef.current * (1 - dy * 0.003), e.clientX, e.clientY)
       else panBy(-dx, -dy)
     }
-    let startDist = 0
-    let startScale = 1
-    let pinching = false
-    let panTouch: { x: number; y: number; tx: number; ty: number } | null = null
-    const distOf = (t: TouchList) => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY)
-    const onTouchStart = (e: TouchEvent) => {
-      if (e.touches.length === 2) {
-        pinching = true
-        startDist = distOf(e.touches)
-        startScale = scaleRef.current
-      } else if (e.touches.length === 1 && panModeRef.current) {
-        panTouch = { x: e.touches[0].clientX, y: e.touches[0].clientY, tx: txRef.current, ty: tyRef.current }
+
+    const onPointerDown = (e: PointerEvent) => {
+      if (e.button !== 0 && e.button !== 1) return // 主键/触摸/笔，或鼠标中键(强制平移)；忽略右键
+      const forcePan = e.button === 1 // 中键拖拽 = 平移（桌面习惯）
+      pointers.set(e.pointerId, { x: e.clientX, y: e.clientY })
+      try { el.setPointerCapture(e.pointerId) } catch { /* ignore */ }
+      e.preventDefault()
+      if (pointers.size >= 2) {
+        if (mode === 'draw') canvasApiRef.current?.cancelStroke() // 第二指按下：丢弃当前笔，转缩放
+        mode = 'zoom'
+        panStart = null
+        setPanning(false)
+        const { a, b } = two()
+        pinch = { dist: Math.max(1, Math.hypot(a.x - b.x, a.y - b.y)), scale: scaleRef.current }
+        return
+      }
+      // 单指
+      if (panModeRef.current || forcePan) {
+        mode = 'pan'
+        setPanning(true)
+        panStart = { x: e.clientX, y: e.clientY, tx: txRef.current, ty: tyRef.current }
+      } else {
+        mode = 'draw'
+        canvasApiRef.current?.beginStroke(e.clientX, e.clientY)
       }
     }
-    const onTouchMove = (e: TouchEvent) => {
-      if (pinching && e.touches.length === 2 && startDist > 0) {
-        e.preventDefault()
-        const d = distOf(e.touches)
-        const mx = (e.touches[0].clientX + e.touches[1].clientX) / 2
-        const my = (e.touches[0].clientY + e.touches[1].clientY) / 2
-        zoomTo(startScale * (d / startDist), mx, my)
-      } else if (panTouch && e.touches.length === 1) {
-        e.preventDefault()
-        setView(scaleRef.current, panTouch.tx + (e.touches[0].clientX - panTouch.x), panTouch.ty + (e.touches[0].clientY - panTouch.y))
+
+    const onPointerMove = (e: PointerEvent) => {
+      if (!pointers.has(e.pointerId)) return
+      pointers.set(e.pointerId, { x: e.clientX, y: e.clientY })
+      e.preventDefault()
+      if (mode === 'zoom' && pointers.size >= 2 && pinch) {
+        const { a, b } = two()
+        const d = Math.hypot(a.x - b.x, a.y - b.y)
+        if (d > 0) zoomTo(pinch.scale * (d / pinch.dist), (a.x + b.x) / 2, (a.y + b.y) / 2)
+      } else if (mode === 'pan' && panStart) {
+        setView(scaleRef.current, panStart.tx + (e.clientX - panStart.x), panStart.ty + (e.clientY - panStart.y))
+      } else if (mode === 'draw') {
+        canvasApiRef.current?.extendStroke(e.clientX, e.clientY)
       }
     }
-    const onTouchEnd = (e: TouchEvent) => {
-      if (e.touches.length < 2) pinching = false
-      if (e.touches.length === 0) panTouch = null
+
+    const onPointerUp = (e: PointerEvent) => {
+      const wasDraw = mode === 'draw'
+      pointers.delete(e.pointerId)
+      try { el.releasePointerCapture(e.pointerId) } catch { /* ignore */ }
+      if (pointers.size === 0) {
+        if (wasDraw) canvasApiRef.current?.endStroke() // 抬笔提交（一次拖动一条历史）
+        mode = 'idle'
+        panStart = null
+        pinch = null
+        setPanning(false)
+      } else {
+        // 还有手指（如双指松开一指）：结束当前手势，等全部抬起再重新开始，避免跳变
+        if (mode === 'zoom') pinch = null
+        if (mode === 'draw') canvasApiRef.current?.cancelStroke()
+        mode = 'idle'
+        panStart = null
+        setPanning(false)
+      }
     }
+
     el.addEventListener('wheel', onWheel, { passive: false })
-    el.addEventListener('touchstart', onTouchStart, { passive: false })
-    el.addEventListener('touchmove', onTouchMove, { passive: false })
-    el.addEventListener('touchend', onTouchEnd)
+    el.addEventListener('pointerdown', onPointerDown, { passive: false })
+    el.addEventListener('pointermove', onPointerMove, { passive: false })
+    el.addEventListener('pointerup', onPointerUp)
+    el.addEventListener('pointercancel', onPointerUp)
     return () => {
       el.removeEventListener('wheel', onWheel)
-      el.removeEventListener('touchstart', onTouchStart)
-      el.removeEventListener('touchmove', onTouchMove)
-      el.removeEventListener('touchend', onTouchEnd)
+      el.removeEventListener('pointerdown', onPointerDown)
+      el.removeEventListener('pointermove', onPointerMove)
+      el.removeEventListener('pointerup', onPointerUp)
+      el.removeEventListener('pointercancel', onPointerUp)
     }
   }, [zoomTo, panBy, setView])
 
@@ -348,25 +408,6 @@ export default function EditorPage() {
   const panMode = tool === 'hand' || spaceHeld
   panModeRef.current = panMode
 
-  // 中键 / 平移模式（手型或空格）下鼠标拖拽 = 平移
-  const startMousePan = (e: ReactMouseEvent) => {
-    if (e.button !== 1 && !panMode) return
-    e.preventDefault()
-    setPanning(true)
-    const sx = e.clientX
-    const sy = e.clientY
-    const tx0 = txRef.current
-    const ty0 = tyRef.current
-    const move = (ev: MouseEvent) => setView(scaleRef.current, tx0 + (ev.clientX - sx), ty0 + (ev.clientY - sy))
-    const up = () => {
-      setPanning(false)
-      window.removeEventListener('mousemove', move)
-      window.removeEventListener('mouseup', up)
-    }
-    window.addEventListener('mousemove', move)
-    window.addEventListener('mouseup', up)
-  }
-
   const meta = { cols: pixels[0]?.length ?? 0, rows: pixels.length }
   // 缩放=重绘（不是 CSS 拉伸）：cellSize 跟随 scale 变大、整图按更高分辨率重画，放大后清晰。
   // renderCell 取整像素作为「重绘档位」；零头用一个≈1 的 residual CSS 缩放补平，保证缩放视觉顺滑。
@@ -379,6 +420,8 @@ export default function EditorPage() {
   const residual = targetCell / renderCell // ≈1（仅大图夹紧后极限放大才 >1）
   const naturalW = meta.cols * renderCell
   const naturalH = meta.rows * renderCell
+  // 显示尺寸（含 residual）+ 视口尺寸 → 供 setView 夹紧平移
+  viewSizeRef.current = { cw: naturalW * residual, ch: naturalH * residual, vw: vpW, vh: vpH }
 
   const doExportPDF = async () => {
     setExportError(null)
@@ -481,8 +524,7 @@ export default function EditorPage() {
           手机 上48/下60/左右0；平板 上50/左54/右48(图标dock)/下0；桌面 右248(面板) */}
       <div
         ref={viewportRef}
-        onMouseDown={startMousePan}
-        className="fixed bottom-[60px] left-0 right-0 top-12 flex items-center justify-center overflow-hidden bg-pegboard-fine md:bottom-0 md:left-[54px] md:right-12 md:top-[50px] lg:right-[248px]"
+        className="fixed bottom-[60px] left-0 right-0 top-12 flex items-center justify-center overflow-hidden overscroll-none bg-pegboard-fine md:bottom-0 md:left-[54px] md:right-12 md:top-[50px] lg:right-[248px]"
         style={{ cursor: panMode ? (panning ? 'grabbing' : 'grab') : 'default', touchAction: 'none' }}
       >
         <div
@@ -494,6 +536,7 @@ export default function EditorPage() {
           }}
         >
           <EditorCanvas
+            ref={canvasApiRef}
             pixels={pixels}
             cellSize={renderCell}
             showGrid={showGrid}
