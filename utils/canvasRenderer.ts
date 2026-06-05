@@ -62,7 +62,7 @@ export function renderGrid(
   pixels: PixelGrid,
   cellSize: number,
   showGrid: boolean,
-  legendMap?: Map<string, number>,
+  legendMap?: Map<string, string>, // hex → 真实色号（如 A13），在格子上标注
   options: RenderOptions = {},
 ): void {
   const rows = pixels.length

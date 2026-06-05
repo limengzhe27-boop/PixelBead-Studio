@@ -4,13 +4,14 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { useRouter } from 'next/navigation'
 import { useProject } from '@/context/ProjectContext'
-import { ARTKAL_MIDI_PALETTE } from '@/data/artkal'
 import {
   isGridEmpty,
   loadImage,
   processImageToGrid,
   recommendDimensions,
 } from '@/utils/imageProcessor'
+import { usePalette } from '@/context/PaletteContext'
+import { PALETTES } from '@/data/palettes'
 import PixelPreview from '@/components/PixelPreview'
 import BrandMark from '@/components/BrandMark'
 import { useIsMobile } from '@/hooks/useMediaQuery'
@@ -21,6 +22,7 @@ export default function ConvertPage() {
   const { state, dispatch } = useProject()
   const router = useRouter()
   const isMobile = useIsMobile()
+  const { paletteId, palette: beadPalette, colors, choose } = usePalette()
 
   const imgRef = useRef<HTMLImageElement | null>(null)
   const ratioRef = useRef(1)
@@ -130,12 +132,12 @@ export default function ConvertPage() {
     if (!imgReady || !imgRef.current) return
     setComputing(true)
     const t = setTimeout(() => {
-      const g = processImageToGrid(imgRef.current!, cols, rows, colorCount, ARTKAL_MIDI_PALETTE, denoise, enhance)
+      const g = processImageToGrid(imgRef.current!, cols, rows, colorCount, colors, denoise, enhance)
       setGrid(g)
       setComputing(false)
     }, 300)
     return () => clearTimeout(t)
-  }, [imgReady, imgVersion, cols, rows, colorCount, denoise, enhance])
+  }, [imgReady, imgVersion, cols, rows, colorCount, denoise, enhance, colors])
 
   const empty = useMemo(() => (grid ? isGridEmpty(grid) : true), [grid])
   // 豆子数：null = 尚未算出（首次防抖转换前），信息卡据此显示「计算中」
@@ -162,9 +164,9 @@ export default function ConvertPage() {
     dispatch({ type: 'SET_DIMENSIONS', payload: { cols: c, rows: r } })
   }
 
-  // 信息卡：实物尺寸（Artkal Mini 单颗 2.6mm）/ 拼盘数（29×29）
-  const widthCm = ((cols * 2.6) / 10).toFixed(1)
-  const heightCm = ((rows * 2.6) / 10).toFixed(1)
+  // 信息卡：实物尺寸（按所选品牌单颗直径）/ 拼盘数（29×29）
+  const widthCm = ((cols * beadPalette.beadSizeMm) / 10).toFixed(1)
+  const heightCm = ((rows * beadPalette.beadSizeMm) / 10).toFixed(1)
   const boards = Math.ceil(cols / 29) * Math.ceil(rows / 29)
 
   const confirm = () => {
@@ -189,6 +191,23 @@ export default function ConvertPage() {
           <BrandMark compact />
         </div>
       </header>
+
+      {/* 品牌（调色板）选择：转换配色与色号、实物尺寸都随之改变 */}
+      <div className="flex shrink-0 items-center gap-2 border-b border-paper-300 bg-paper-50 px-4 py-2">
+        <span className="shrink-0 text-sm text-ink-soft">品牌</span>
+        <select
+          value={paletteId}
+          onChange={(e) => choose(e.target.value)}
+          className="min-h-[36px] cursor-pointer rounded-lg border-2 border-paper-300 bg-white px-2 py-1 text-sm font-medium text-ink outline-none focus:border-ink"
+        >
+          {PALETTES.map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.name}
+            </option>
+          ))}
+        </select>
+        <span className="text-xs text-ink-faint">单颗 {beadPalette.beadSizeMm}mm · {beadPalette.colors.length} 色</span>
+      </div>
 
       {fromRecognize && (
         <div className="shrink-0 border-b-2 border-ink bg-sun/40 px-4 py-2 text-center text-xs leading-snug text-ink">

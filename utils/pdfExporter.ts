@@ -1,4 +1,4 @@
-import { jsPDF } from 'jspdf'
+import type { jsPDF } from 'jspdf' // 仅类型（编译期擦除）；运行时在 exportPDF 内动态 import，避免 jspdf 进入编辑器主包
 import type { LegendItem, PixelGrid } from '../types'
 import { renderGrid, gridToDataURL } from './canvasRenderer'
 import { encodeAllRows, segmentLabel } from './runLengthEncoder'
@@ -79,8 +79,8 @@ function buildChartPages(
   startPageNo: number,
   pageTotal: number,
 ): number {
-  const legendMap = new Map<string, number>()
-  for (const it of legend) legendMap.set(it.hex.toUpperCase(), it.index)
+  const legendMap = new Map<string, string>()
+  for (const it of legend) legendMap.set(it.hex.toUpperCase(), it.artkalCode)
 
   const headerH = 34
   const footerH = 30
@@ -342,7 +342,8 @@ export async function exportPDF(
   legend: LegendItem[],
   meta: { cols: number; rows: number },
 ): Promise<void> {
-  const doc = new jsPDF({ unit: 'pt', format: 'a4', orientation: 'portrait' })
+  const { jsPDF: JsPDF } = await import('jspdf') // 懒加载：仅在真正导出 PDF 时才拉取 jspdf
+  const doc = new JsPDF({ unit: 'pt', format: 'a4', orientation: 'portrait' })
   const pageTotal = countChartPages(pixels) + countLegendPages(legend) + countRowGuidePages(pixels)
   const afterChart = buildChartPages(doc, pixels, legend, meta, 1, pageTotal)
   const afterLegend = buildLegendPages(doc, legend, afterChart, pageTotal)

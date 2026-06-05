@@ -37,10 +37,10 @@ export function buildLegend(pixels: PixelGrid, palette?: ColorEntry[]): LegendIt
   })
 }
 
-/** hex（大写）→ 序号，供 renderGrid 显示序号使用 */
-export function buildLegendMap(legend: LegendItem[]): Map<string, number> {
-  const map = new Map<string, number>()
-  for (const item of legend) map.set(item.hex.toUpperCase(), item.index)
+/** hex（大写）→ 真实色号（如 A13 / H7），供 renderGrid 在格子上显示真实色号（不再是顺序编号） */
+export function buildLegendMap(legend: LegendItem[]): Map<string, string> {
+  const map = new Map<string, string>()
+  for (const item of legend) map.set(item.hex.toUpperCase(), item.artkalCode)
   return map
 }
 

@@ -7,7 +7,7 @@ interface Props {
   pixels: PixelGrid // 已提交的像素（来自 context）
   cellSize: number
   showGrid: boolean
-  legendMap: Map<string, number>
+  legendMap: Map<string, string>
   tool: ToolType
   color: string
   onCommit: (grid: PixelGrid) => void // mouseup 时提交一步历史

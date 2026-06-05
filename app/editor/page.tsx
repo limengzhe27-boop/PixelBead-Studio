@@ -20,7 +20,8 @@ import { useIsMobile, useIsTablet } from '@/hooks/useMediaQuery'
 import { buildLegend, buildLegendMap } from '@/utils/legendBuilder'
 import { encodeRow } from '@/utils/runLengthEncoder'
 import { exportPDF, exportPNG } from '@/utils/pdfExporter'
-import { BRANDS, getBrand } from '@/data/brands'
+import { usePalette } from '@/context/PaletteContext'
+import { PALETTES, getPaletteById } from '@/data/palettes'
 import { hexToRgb, snapToArtkal } from '@/utils/imageProcessor'
 import type { ColorEntry, LegendItem, PixelGrid, ToolType } from '@/types'
 
@@ -49,7 +50,7 @@ export default function EditorPage() {
   const [selectedRow, setSelectedRow] = useState<number | null>(null)
   const [substituteHex, setSubstituteHex] = useState<string | null>(null)
   const [showGuide, setShowGuide] = useState(false)
-  const [brand, setBrand] = useState('artkal-midi')
+  const { paletteId, colors: palette, choose } = usePalette() // palette = 当前品牌色（桥接成 ColorEntry[]）
   const [brushSize, setBrushSize] = useState(1)
   const [completedRows, setCompletedRows] = useState<Set<number>>(() => new Set())
   const [colorOpen, setColorOpen] = useState(true)
@@ -72,7 +73,6 @@ export default function EditorPage() {
   const panModeRef = useRef(false)
 
   const pixels = state.pixels
-  const palette = useMemo(() => getBrand(brand).palette, [brand])
   const legend = useMemo(() => buildLegend(pixels ?? [], palette), [pixels, palette])
   const legendMap = useMemo(() => buildLegendMap(legend), [legend])
   const isEmpty = useMemo(() => !!pixels && pixels.every((row) => row.every((c) => c === null)), [pixels])
@@ -291,8 +291,8 @@ export default function EditorPage() {
 
   // 功能1：切换品牌 → 全图重 snap 到新色卡最近色 + 当前色重 snap，入撤销栈
   const switchBrand = (id: string) => {
-    setBrand(id)
-    const pal = getBrand(id).palette
+    choose(id)
+    const pal = getPaletteById(id).colors.map((c) => ({ code: c.code, hex: c.hex, name_cn: '', name_en: '' }))
     if (pixels) {
       const resnapped = pixels.map((row) =>
         row.map((cell) => {
@@ -508,13 +508,13 @@ export default function EditorPage() {
         <div className="flex shrink-0 items-center gap-2 border-b border-slate-100 px-3.5 py-2.5">
           <span className="shrink-0 text-xs text-slate-600">品牌</span>
           <select
-            value={brand}
+            value={paletteId}
             onChange={(e) => switchBrand(e.target.value)}
             className="flex-1 cursor-pointer rounded-lg border border-slate-200 bg-slate-0 px-2 py-1.5 text-sm text-slate-800 outline-none focus:border-coral"
           >
-            {BRANDS.map((bd) => (
-              <option key={bd.id} value={bd.id}>
-                {bd.label}（{bd.mm}）
+            {PALETTES.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
               </option>
             ))}
           </select>
@@ -559,7 +559,7 @@ export default function EditorPage() {
             {tabletPanel === 'legend' ? (
               <LegendPanelBody cols={meta.cols} rows={meta.rows} legend={legend} onReplace={setSubstituteHex} />
             ) : (
-              <ColorPanelBody brand={brand} switchBrand={switchBrand} palette={palette} color={color} setColor={setColor} />
+              <ColorPanelBody brand={paletteId} switchBrand={switchBrand} palette={palette} color={color} setColor={setColor} />
             )}
           </Sheet>
         </>
@@ -570,7 +570,7 @@ export default function EditorPage() {
         <>
           <MobileToolbar tool={tool} setTool={setTool} color={color} onOpenColor={() => setColorSheet(true)} onOpenLegend={() => setLegendSheet(true)} />
           <Sheet open={colorSheet} onClose={() => setColorSheet(false)} side="bottom" heightVh={60} title="颜色板" icon="🎨">
-            <ColorPanelBody brand={brand} switchBrand={switchBrand} palette={palette} color={color} setColor={setColor} />
+            <ColorPanelBody brand={paletteId} switchBrand={switchBrand} palette={palette} color={color} setColor={setColor} />
           </Sheet>
           <Sheet open={legendSheet} onClose={() => setLegendSheet(false)} side="bottom" heightVh={70} title="用豆清单" icon="📋">
             <LegendPanelBody cols={meta.cols} rows={meta.rows} legend={legend} onReplace={setSubstituteHex} />
@@ -677,9 +677,9 @@ function ColorPanelBody({
           onChange={(e) => switchBrand(e.target.value)}
           className="min-h-[40px] flex-1 cursor-pointer rounded-lg border border-slate-200 bg-slate-0 px-2 py-1.5 text-sm text-slate-800 outline-none focus:border-coral"
         >
-          {BRANDS.map((bd) => (
-            <option key={bd.id} value={bd.id}>
-              {bd.label}（{bd.mm}）
+          {PALETTES.map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.name}
             </option>
           ))}
         </select>

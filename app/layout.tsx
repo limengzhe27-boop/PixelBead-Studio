@@ -3,6 +3,7 @@ import type { Metadata, Viewport } from 'next'
 import type { ReactNode } from 'react'
 import { ProjectProvider } from '@/context/ProjectContext'
 import { SettingsProvider } from '@/context/SettingsContext'
+import { PaletteProvider } from '@/context/PaletteContext'
 import ProviderSettingsModal from '@/components/ProviderSettingsModal'
 
 export const metadata: Metadata = {
@@ -35,10 +36,12 @@ export default function RootLayout({ children }: { children: ReactNode }) {
       </head>
       <body>
         <ProjectProvider>
-          <SettingsProvider>
-            {children}
-            <ProviderSettingsModal />
-          </SettingsProvider>
+          <PaletteProvider>
+            <SettingsProvider>
+              {children}
+              <ProviderSettingsModal />
+            </SettingsProvider>
+          </PaletteProvider>
         </ProjectProvider>
       </body>
     </html>
