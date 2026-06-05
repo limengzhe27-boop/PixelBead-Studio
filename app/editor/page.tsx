@@ -56,6 +56,7 @@ export default function EditorPage() {
   const [colorOpen, setColorOpen] = useState(true)
   const [legendOpen, setLegendOpen] = useState(true)
   const [vpH, setVpH] = useState(0) // 画布视口高度，用于左侧行号列定位
+  const [vpW, setVpW] = useState(0) // 画布视口宽度，用于顶部列号行定位
 
   // 响应式：断点 + 平板浮动面板 / 手机底部抽屉
   const isMobile = useIsMobile()
@@ -93,9 +94,12 @@ export default function EditorPage() {
     }
   }, [])
 
-  // 测量画布视口高度（左侧行号列按 scale/translateY 定位时需要），随窗口变化更新
+  // 测量画布视口尺寸（左侧行号 / 顶部列号按 scale/translate 定位时需要），随窗口变化更新
   useEffect(() => {
-    const measure = () => setVpH(viewportRef.current?.clientHeight ?? 0)
+    const measure = () => {
+      setVpH(viewportRef.current?.clientHeight ?? 0)
+      setVpW(viewportRef.current?.clientWidth ?? 0)
+    }
     measure()
     window.addEventListener('resize', measure)
     return () => window.removeEventListener('resize', measure)
@@ -495,12 +499,14 @@ export default function EditorPage() {
             brushSize={brushSize}
             completedRows={completedRows}
             panMode={panMode}
+            scale={scale}
           />
         </div>
       </div>
 
-      {/* 左侧常驻行号列（桌面 + 平板；手机隐藏，避免与画布争位） */}
+      {/* 左侧常驻行号列 + 顶部列号行（桌面 + 平板；手机隐藏，避免与画布争位） */}
       {!isMobile && <RowGutter rows={meta.rows} scale={scale} translateY={translateY} vpH={vpH} selectedRow={selectedRow} />}
+      {!isMobile && <ColumnGutter cols={meta.cols} scale={scale} translateX={translateX} vpW={vpW} />}
 
       {/* ===== 右侧面板（桌面 ≥1024 固定 248px） ===== */}
       <div className="fixed bottom-0 right-0 top-[50px] z-20 hidden w-[248px] flex-col border-l-2 border-ink bg-slate-0 lg:flex">
@@ -758,6 +764,47 @@ function RowGutter({
           key={it.n}
           className={`absolute right-1 -translate-y-1/2 font-mono leading-none ${it.sel ? 'font-bold' : ''}`}
           style={{ top: it.y, color: it.sel ? '#FF6B00' : '#999', fontSize: it.sel ? 12 : 11 }}
+        >
+          {it.n}
+        </span>
+      ))}
+    </div>
+  )
+}
+
+/**
+ * 顶部常驻列号行：HTML 叠加（不入 canvas），每 5 列标一次。
+ * 文字大小不随画布缩放变化，但每列水平位置随 scale / translateX 同步计算。
+ */
+function ColumnGutter({
+  cols,
+  scale,
+  translateX,
+  vpW,
+}: {
+  cols: number
+  scale: number
+  translateX: number
+  vpW: number
+}) {
+  if (vpW <= 0 || cols <= 0) return null
+  const cellPx = CELL_SIZE * scale
+  // 画布在视口内 flex 居中后再 translate：画布左边相对视口左的 x
+  const canvasLeft = vpW / 2 + translateX - (cols * cellPx) / 2
+  const items: { n: number; x: number }[] = []
+  for (let n = 1; n <= cols; n++) {
+    if (n !== 1 && n % 5 !== 0) continue // 第 1、5、10、15… 列
+    const x = canvasLeft + (n - 0.5) * cellPx // 该列中心相对视口左
+    if (x < -10 || x > vpW + 10) continue // 视口外不渲染
+    items.push({ n, x })
+  }
+  return (
+    <div className="pointer-events-none fixed left-[54px] right-12 top-[50px] z-20 h-5 lg:right-[248px]">
+      {items.map((it) => (
+        <span
+          key={it.n}
+          className="absolute top-0.5 -translate-x-1/2 font-mono leading-none"
+          style={{ left: it.x, color: '#999', fontSize: 11 }}
         >
           {it.n}
         </span>

@@ -18,10 +18,42 @@ interface Props {
   brushSize?: number // 画笔/橡皮笔刷尺寸 1/2/3（功能3）
   completedRows?: Set<number> // 已完成行绿蒙层（功能6）
   panMode?: boolean // 手型/空格 平移模式：不绘制（模块2）
+  scale?: number // 当前 CSS 缩放（仅用于决定色号文字在缩小时是否隐藏，§5.3）
 }
 
 function clone(grid: PixelGrid): PixelGrid {
   return grid.map((row) => row.slice())
+}
+
+const RENDER_LIMIT = 8192 // 画布缓冲区单边上限，超采样倍率据此夹紧（大图安全）
+
+/**
+ * 编辑器图纸绘制：在 renderGrid 基础上加「高清超采样 + 拼盘分区线 + 缩小时隐藏色号」。
+ * pixelRatio = min(dpr×2, 上限/像素宽)，让放大后清晰且大图不爆缓冲区。
+ */
+function drawEditor(
+  canvas: HTMLCanvasElement,
+  grid: PixelGrid,
+  o: {
+    cellSize: number
+    showGrid: boolean
+    legendMap?: Map<string, string>
+    completedRows?: Set<number>
+    selectedRow?: number | null
+    scale?: number
+  },
+): void {
+  const cols = grid[0]?.length ?? 0
+  if (!cols) return
+  const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1
+  const pr = Math.max(1, Math.min(dpr * 2, Math.floor(RENDER_LIMIT / (cols * o.cellSize))))
+  const showText = o.cellSize * (o.scale ?? 1) >= 14 // 缩小到每格 <14px 时隐藏色号，放大后再显示
+  renderGrid(canvas, grid, o.cellSize, o.showGrid, showText ? o.legendMap : undefined, {
+    completedRows: o.completedRows,
+    selectedRow: o.selectedRow,
+    pixelRatio: pr,
+    dividers: 29,
+  })
 }
 
 /** Bresenham 直线，填补快速拖拽时相邻采样点之间的空格 */
@@ -81,6 +113,7 @@ export default function EditorCanvas({
   brushSize,
   completedRows,
   panMode,
+  scale = 1,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const workRef = useRef<PixelGrid>(pixels)
@@ -89,41 +122,40 @@ export default function EditorCanvas({
   const rafRef = useRef<number | null>(null)
 
   // 设置项放入 ref，避免在一笔绘制过程中因闭包过期取到旧值
-  const cfg = useRef({ cellSize, showGrid, legendMap, tool, color, onCommit, onPickColor, guideMode, onSelectRow, selectedRow, brushSize, completedRows, panMode })
-  cfg.current = { cellSize, showGrid, legendMap, tool, color, onCommit, onPickColor, guideMode, onSelectRow, selectedRow, brushSize, completedRows, panMode }
+  const cfg = useRef({ cellSize, showGrid, legendMap, tool, color, onCommit, onPickColor, guideMode, onSelectRow, selectedRow, brushSize, completedRows, panMode, scale })
+  cfg.current = { cellSize, showGrid, legendMap, tool, color, onCommit, onPickColor, guideMode, onSelectRow, selectedRow, brushSize, completedRows, panMode, scale }
+
+  // 缩小到每格 <14px 时隐藏色号 → 仅在跨过阈值时重绘，避免缩放途中频繁整图重绘
+  const textOn = cellSize * scale >= 14
 
   // 已提交像素变化（转换进入 / 撤销 / 重做 / 提交后）/ 选中行变化 → 同步 workRef 并整体重绘
   useEffect(() => {
     if (drawingRef.current) return
     workRef.current = pixels
     const canvas = canvasRef.current
-    if (canvas) renderGrid(canvas, pixels, cellSize, showGrid, legendMap, { completedRows, selectedRow })
-  }, [pixels, cellSize, showGrid, legendMap, completedRows, selectedRow])
+    if (canvas) drawEditor(canvas, pixels, { cellSize, showGrid, legendMap, completedRows, selectedRow, scale })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pixels, cellSize, showGrid, legendMap, completedRows, selectedRow, textOn])
 
   const scheduleRender = () => {
     if (rafRef.current != null) return
     rafRef.current = requestAnimationFrame(() => {
       rafRef.current = null
       const canvas = canvasRef.current
-      if (canvas) {
-        const { cellSize: cs, showGrid: sg, legendMap: lm, completedRows: cr, selectedRow: sr } = cfg.current
-        renderGrid(canvas, workRef.current, cs, sg, lm, { completedRows: cr, selectedRow: sr })
-      }
+      if (canvas) drawEditor(canvas, workRef.current, cfg.current)
     })
   }
 
+  // 命中测试与渲染分辨率/缩放解耦：直接用显示矩形 + 网格行列数换算，放大/超采样都正确（不改高亮逻辑）
   const cellFromEvent = (e: MouseEvent | ReactMouseEvent): [number, number] | null => {
     const canvas = canvasRef.current
     if (!canvas) return null
     const rect = canvas.getBoundingClientRect()
-    const scaleX = canvas.width / rect.width
-    const scaleY = canvas.height / rect.height
-    const x = (e.clientX - rect.left) * scaleX
-    const y = (e.clientY - rect.top) * scaleY
-    const c = Math.floor(x / cfg.current.cellSize)
-    const r = Math.floor(y / cfg.current.cellSize)
     const rows = workRef.current.length
     const cols = workRef.current[0]?.length ?? 0
+    if (!rows || !cols || rect.width === 0 || rect.height === 0) return null
+    const c = Math.floor((e.clientX - rect.left) / (rect.width / cols))
+    const r = Math.floor((e.clientY - rect.top) / (rect.height / rows))
     if (r < 0 || c < 0 || r >= rows || c >= cols) return null
     return [r, c]
   }
@@ -171,7 +203,7 @@ export default function EditorCanvas({
     if (t === 'bucket') {
       floodFill(workRef.current, r, c, cfg.current.color)
       const canvas = canvasRef.current
-      if (canvas) renderGrid(canvas, workRef.current, cfg.current.cellSize, cfg.current.showGrid, cfg.current.legendMap, { completedRows: cfg.current.completedRows, selectedRow: cfg.current.selectedRow })
+      if (canvas) drawEditor(canvas, workRef.current, cfg.current)
       cfg.current.onCommit(workRef.current) // 单击操作，立即提交
       return
     }
@@ -180,7 +212,7 @@ export default function EditorCanvas({
       // 魔法橡皮：洪水填充将相连同色区域置 null（透明），单击操作
       floodFill(workRef.current, r, c, null)
       const canvas = canvasRef.current
-      if (canvas) renderGrid(canvas, workRef.current, cfg.current.cellSize, cfg.current.showGrid, cfg.current.legendMap, { completedRows: cfg.current.completedRows, selectedRow: cfg.current.selectedRow })
+      if (canvas) drawEditor(canvas, workRef.current, cfg.current)
       cfg.current.onCommit(workRef.current)
       return
     }
@@ -239,7 +271,7 @@ export default function EditorCanvas({
       ref={canvasRef}
       onMouseDown={handleMouseDown}
       onContextMenu={(e) => e.preventDefault()}
-      style={{ cursor, imageRendering: 'pixelated', touchAction: 'none' }}
+      style={{ cursor, touchAction: 'none' }}
       className="block rounded-md shadow-craft"
     />
   )

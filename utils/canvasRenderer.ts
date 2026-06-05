@@ -15,37 +15,14 @@ import type { PixelGrid } from '../types'
 const EMPTY_LIGHT = '#FAF8F2'
 const EMPTY_DARK = '#ECE8DE'
 
-function roundRectPath(
-  ctx: CanvasRenderingContext2D,
-  x: number,
-  y: number,
-  w: number,
-  h: number,
-  r: number,
-) {
-  if (typeof ctx.roundRect === 'function') {
-    ctx.beginPath()
-    ctx.roundRect(x, y, w, h, r)
-    return
-  }
-  ctx.beginPath()
-  ctx.moveTo(x + r, y)
-  ctx.arcTo(x + w, y, x + w, y + h, r)
-  ctx.arcTo(x + w, y + h, x, y + h, r)
-  ctx.arcTo(x, y + h, x, y, r)
-  ctx.arcTo(x, y, x + w, y, r)
-  ctx.closePath()
-}
-
-/** 相对亮度，决定序号文字用深色还是白色，保证可读 */
-function isDark(hex: string): boolean {
+/** 色号文字取黑/白：浅格用黑字、深格用白字，保证高对比可读（§5.3） */
+function textColorFor(hex: string): string {
   const h = hex.replace('#', '')
   const r = parseInt(h.slice(0, 2), 16)
   const g = parseInt(h.slice(2, 4), 16)
   const b = parseInt(h.slice(4, 6), 16)
-  // sRGB 相对亮度近似
-  const lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255
-  return lum < 0.58
+  const luma = 0.299 * r + 0.587 * g + 0.114 * b // 感知亮度 0–255
+  return luma > 140 ? '#000000' : '#FFFFFF'
 }
 
 export interface RenderOptions {
@@ -55,6 +32,13 @@ export interface RenderOptions {
   completedRows?: Set<number>
   /** 行定位高亮：当前选中行（其余行压暗 + 橙色描边）；null/undefined 不绘制 */
   selectedRow?: number | null
+  /**
+   * 设备像素比 / 超采样倍率（§5.2）。editor 传 >1：画布缓冲区放大该倍、CSS 显示尺寸不变、
+   * 坐标按 CSS 像素绘制 → 放大后依然清晰（不是拉伸位图）。PDF / 预览不传 = 1，行为不变。
+   */
+  pixelRatio?: number
+  /** 每 N 格画一条拼盘分区粗线（editor 传 29 = 一块拼盘）；不传则沿用旧的每 10 格参考线 */
+  dividers?: number
 }
 
 export function renderGrid(
@@ -67,25 +51,32 @@ export function renderGrid(
 ): void {
   const rows = pixels.length
   const cols = rows > 0 ? pixels[0].length : 0
-  const w = cols * cellSize
+  const w = cols * cellSize // CSS 像素尺寸
   const h = rows * cellSize
 
-  // 仅在尺寸变化时重设，避免不必要的清空/重分配
-  if (canvas.width !== w) canvas.width = w
-  if (canvas.height !== h) canvas.height = h
+  // 高清渲染：缓冲区按 pixelRatio 放大，CSS 显示尺寸保持 w×h，绘制坐标用 CSS 像素（§5.2）
+  const pr = options.pixelRatio ?? 1
+  const bw = Math.round(w * pr)
+  const bh = Math.round(h * pr)
+  if (canvas.width !== bw) canvas.width = bw
+  if (canvas.height !== bh) canvas.height = bh
+  if (options.pixelRatio != null) {
+    canvas.style.width = `${w}px`
+    canvas.style.height = `${h}px`
+  }
 
   const ctx = canvas.getContext('2d')
   if (!ctx) return
+  ctx.setTransform(pr, 0, 0, pr, 0, 0) // 之后按 CSS 像素坐标绘制即可
   ctx.clearRect(0, 0, w, h)
 
   const drawEmpty = options.drawEmpty ?? true
-  const radius = cellSize >= 4 ? Math.max(1, Math.floor(cellSize * 0.24)) : 0
-  const gloss = cellSize >= 8
-  const showNum = !!legendMap && cellSize >= 10
-  const inset = cellSize >= 6 ? 0.5 : 0 // 留出微缝，beads 之间有间隙感
+  // 平整纯色格子（§5.1）：去掉圆角 + 渐变光泽，换成纯色方块 + 细边框，读图最清晰
+  const showBorder = showGrid && cellSize >= 4
+  const showNum = !!legendMap && cellSize >= 11
 
   if (showNum) {
-    ctx.font = `500 ${Math.max(8, Math.round(cellSize * 0.46))}px "DM Mono", ui-monospace, monospace`
+    ctx.font = `600 ${Math.max(7, Math.floor(cellSize * 0.4))}px "DM Mono", ui-monospace, monospace`
     ctx.textAlign = 'center'
     ctx.textBaseline = 'middle'
   }
@@ -103,86 +94,49 @@ export function renderGrid(
         continue
       }
 
-      const bx = dx + inset
-      const by = py + inset
-      const bw = cellSize - inset * 2
-      const bh = cellSize - inset * 2
-
-      // 豆体填充
+      // 纯色填充
       ctx.fillStyle = px
-      if (radius > 0) {
-        roundRectPath(ctx, bx, by, bw, bh, radius)
-        ctx.fill()
-      } else {
-        ctx.fillRect(bx, by, bw, bh)
+      ctx.fillRect(dx, py, cellSize, cellSize)
+
+      // 1px 细边框（仅在显示网格时）
+      if (showBorder) {
+        ctx.strokeStyle = 'rgba(0,0,0,0.12)'
+        ctx.lineWidth = 1
+        ctx.strokeRect(dx + 0.5, py + 0.5, cellSize - 1, cellSize - 1)
       }
 
-      // 3D 高光（圆形拼豆质感）
-      if (gloss) {
-        ctx.save()
-        if (radius > 0) {
-          roundRectPath(ctx, bx, by, bw, bh, radius)
-          ctx.clip()
-        }
-        // 左上柔光
-        ctx.fillStyle = 'rgba(255,255,255,0.34)'
-        ctx.beginPath()
-        ctx.ellipse(
-          bx + bw * 0.34,
-          by + bh * 0.3,
-          bw * 0.2,
-          bh * 0.13,
-          -0.5,
-          0,
-          Math.PI * 2,
-        )
-        ctx.fill()
-        // 右下暗边，增加体积感
-        ctx.fillStyle = 'rgba(0,0,0,0.1)'
-        ctx.beginPath()
-        ctx.ellipse(
-          bx + bw * 0.7,
-          by + bh * 0.78,
-          bw * 0.32,
-          bh * 0.18,
-          -0.5,
-          0,
-          Math.PI * 2,
-        )
-        ctx.fill()
-        ctx.restore()
-      }
-
-      // 序号
+      // 高对比色号文字（§5.3：浅格黑字、深格白字；字号随 cellSize 自适应）
       if (showNum && legendMap) {
-        const num = legendMap.get(px)
-        if (num !== undefined) {
-          ctx.fillStyle = isDark(px) ? 'rgba(255,255,255,0.92)' : 'rgba(20,18,16,0.82)'
-          ctx.fillText(String(num), dx + cellSize / 2, py + cellSize / 2 + 0.5)
+        const code = legendMap.get(px)
+        if (code !== undefined) {
+          ctx.fillStyle = textColorFor(px)
+          ctx.fillText(String(code), dx + cellSize / 2, py + cellSize / 2)
         }
       }
     }
   }
 
-  // 网格线
+  // 拼盘分区线 / 参考线（§5.4）
   if (showGrid && cellSize >= 6) {
-    ctx.strokeStyle = 'rgba(43,38,34,0.12)'
-    ctx.lineWidth = 1
-    ctx.beginPath()
-    for (let x = 0; x <= cols; x++) {
-      const gx = Math.round(x * cellSize) + 0.5
-      ctx.moveTo(gx, 0)
-      ctx.lineTo(gx, h)
-    }
-    for (let y = 0; y <= rows; y++) {
-      const gy = Math.round(y * cellSize) + 0.5
-      ctx.moveTo(0, gy)
-      ctx.lineTo(w, gy)
-    }
-    ctx.stroke()
-
-    // 每 10 格加粗一条参考线，方便大图纸定位（拼豆/十字绣惯例）
-    if (cellSize >= 8) {
+    const n = options.dividers && options.dividers > 0 ? options.dividers : 0
+    if (n > 0) {
+      // 每 n 格（一块拼盘）一条较粗的珊瑚红分区线，方便定位
+      ctx.strokeStyle = 'rgba(214,69,52,0.65)'
+      ctx.lineWidth = Math.max(1.5, cellSize * 0.08)
+      ctx.beginPath()
+      for (let x = n; x < cols; x += n) {
+        const gx = Math.round(x * cellSize) + 0.5
+        ctx.moveTo(gx, 0)
+        ctx.lineTo(gx, h)
+      }
+      for (let y = n; y < rows; y += n) {
+        const gy = Math.round(y * cellSize) + 0.5
+        ctx.moveTo(0, gy)
+        ctx.lineTo(w, gy)
+      }
+      ctx.stroke()
+    } else if (cellSize >= 8) {
+      // 旧：每 10 格加粗一条参考线（PDF / 预览沿用）
       ctx.strokeStyle = 'rgba(43,38,34,0.28)'
       ctx.lineWidth = 1
       ctx.beginPath()
