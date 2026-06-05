@@ -447,14 +447,75 @@ function ditherToActive(
   return grid
 }
 
+// ---------- 中值切割（median-cut）量化：让「颜色数量 N」真正决定最终用色丰富度 ----------
+
+/**
+ * 中值切割：把一堆 RGB 像素切成 n 个颜色盒，每盒取平均 → n 个代表色。
+ * 确定性算法（同图同 n 结果一致，拖滑块不闪烁）。比 K-means 快、稳。
+ * 颜色已单一（无法再切）时提前结束，返回数可能 <n。
+ */
+function medianCut(pixels: RGB[], n: number): RGB[] {
+  if (pixels.length === 0 || n < 1) return []
+  let boxes: RGB[][] = [pixels]
+  while (boxes.length < n) {
+    // 找「颜色跨度最大」的盒子及其最长通道
+    let bi = -1
+    let bestRange = -1
+    let bestCh: 'r' | 'g' | 'b' = 'r'
+    for (let i = 0; i < boxes.length; i++) {
+      const box = boxes[i]
+      if (box.length < 2) continue
+      for (const ch of ['r', 'g', 'b'] as const) {
+        let mn = 255
+        let mx = 0
+        for (const px of box) {
+          const v = px[ch]
+          if (v < mn) mn = v
+          if (v > mx) mx = v
+        }
+        const range = mx - mn
+        if (range > bestRange) {
+          bestRange = range
+          bi = i
+          bestCh = ch
+        }
+      }
+    }
+    if (bi < 0) break // 所有盒子颜色已单一，无法再切
+    const box = boxes[bi]
+    box.sort((a, b) => a[bestCh] - b[bestCh])
+    const mid = box.length >> 1
+    boxes.splice(bi, 1, box.slice(0, mid), box.slice(mid))
+  }
+  return boxes.map((box) => {
+    let sr = 0
+    let sg = 0
+    let sb = 0
+    for (const px of box) {
+      sr += px.r
+      sg += px.g
+      sb += px.b
+    }
+    const k = box.length || 1
+    return { r: Math.round(sr / k), g: Math.round(sg / k), b: Math.round(sb / k) }
+  })
+}
+
 // ---------- 编排：图片 → 最终图纸 ----------
 // （原 cleanupIsolated「孤立像素清除」已删除：它把眼睛/细线等重要小细节当噪点误删，得不偿失。）
 
+const SAMPLE_MAX = 20000 // median-cut 取代表色时的最大采样像素数（确定性等距抽样，控制开销）
+
+function emptyGrid(cols: number, rows: number): PixelGrid {
+  return Array.from({ length: rows }, () => new Array<string | null>(cols).fill(null))
+}
+
 /**
- * 便捷编排：rasterize(Step1-2) → snap(Step3) → quantizeColors(Step4)[→ 可选抖动]，转换设置页 / AI 复用。
- * denoise 开启时：缩放前对源图做 3×3 中值滤波（rasterize 内，去噪同时保留边缘）。
- * dither 开启时：先用 quantizeColors 定下「可用颜色集合」，再对缩放后的像素做 Floyd–Steinberg
- *   误差扩散量化到该集合，让有限颜色模拟更丰富的过渡（星空 / 肤色等渐变不断层）。
+ * 便捷编排：rasterize → median-cut 量化到 N 代表色 → snap 到品牌色得 activeColors（≤N）
+ *   → 给每个非透明格上色（最近色 / 抖动均只在 activeColors 内）。转换设置页 / AI 复用。
+ *
+ * 关键：颜色数量 N 直接决定最终用色丰富度——先按 N 对「原始像素」量化，再 snap 到品牌色，
+ * 而不是先把每个像素 snap 到全 221 色（那样 N 只能往下砍、调大无效）。透明格全程保持 null。
  */
 export function processImageToGrid(
   img: HTMLImageElement,
@@ -467,29 +528,44 @@ export function processImageToGrid(
   dither = false,
 ): PixelGrid {
   const data = rasterize(img, cols, rows, denoise, enhance)
-  const pal = getPaletteRGB(palette)
+  const total = cols * rows
 
-  // Step 3：全保真 snap → 网格
-  const full: PixelGrid = []
-  for (let y = 0; y < rows; y++) {
-    const r: (string | null)[] = []
-    for (let x = 0; x < cols; x++) {
-      const i = (y * cols + x) * 4
-      r.push(data[i + 3] < ALPHA_THRESHOLD ? null : nearestInPalette(data[i], data[i + 1], data[i + 2], pal))
-    }
-    full.push(r)
+  // 1) 收集非透明像素 RGB（确定性等距抽样，避免大图全量排序卡顿）
+  let opaque = 0
+  for (let i = 0; i < total; i++) if (data[i * 4 + 3] >= ALPHA_THRESHOLD) opaque++
+  if (opaque === 0) return emptyGrid(cols, rows)
+  const stride = Math.max(1, Math.floor(opaque / SAMPLE_MAX))
+  const sample: RGB[] = []
+  let seen = 0
+  for (let i = 0; i < total; i++) {
+    if (data[i * 4 + 3] < ALPHA_THRESHOLD) continue
+    if (seen % stride === 0) sample.push({ r: data[i * 4], g: data[i * 4 + 1], b: data[i * 4 + 2] })
+    seen++
   }
 
-  // Step 4：颜色种数控制（k-means 聚类回 snap），确定最终用色集合
-  const reduced = quantizeColors(full, colorCount, palette)
-  if (!dither) return reduced
+  // 2) median-cut → N 个代表色；3) 每个代表色 snap 到品牌最近色 → activeColors（去重 ≤N）
+  const reps = medianCut(sample, Math.max(1, colorCount))
+  const pal = getPaletteRGB(palette)
+  const activeMap = new Map<string, PaletteRGB>()
+  for (const rep of reps) {
+    const e = nearestEntry(rep.r, rep.g, rep.b, pal)
+    if (!activeMap.has(e.hex)) activeMap.set(e.hex, e)
+  }
+  const active = [...activeMap.values()]
+  if (active.length === 0) return emptyGrid(cols, rows)
 
-  // 抖动：以 reduced 的实际用色为「可用颜色集合」，对缩放后像素做误差扩散
-  const activeHex = new Set<string>()
-  for (const row of reduced) for (const cell of row) if (cell) activeHex.add(cell)
-  if (activeHex.size === 0) return reduced
-  const active: PaletteRGB[] = [...activeHex].map((hex) => ({ hex, ...hexToRgb(hex) }))
-  return ditherToActive(data, cols, rows, active)
+  // 4) 上色：抖动（Floyd–Steinberg，仅在 activeColors 内扩散）或直接最近色；透明格保持 null
+  if (dither) return ditherToActive(data, cols, rows, active)
+  const grid: PixelGrid = []
+  for (let y = 0; y < rows; y++) {
+    const row: (string | null)[] = []
+    for (let x = 0; x < cols; x++) {
+      const i = (y * cols + x) * 4
+      row.push(data[i + 3] < ALPHA_THRESHOLD ? null : nearestEntry(data[i], data[i + 1], data[i + 2], active).hex)
+    }
+    grid.push(row)
+  }
+  return grid
 }
 
 /** 判断网格是否全空（用于异常处理：图片全透明 / 转换后全空） */
