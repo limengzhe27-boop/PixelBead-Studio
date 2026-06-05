@@ -1,7 +1,14 @@
 import type { jsPDF } from 'jspdf' // 仅类型（编译期擦除）；运行时在 exportPDF 内动态 import，避免 jspdf 进入编辑器主包
 import type { LegendItem, PixelGrid } from '../types'
 import { renderGrid, gridToDataURL } from './canvasRenderer'
-import { encodeAllRows, segmentLabel } from './runLengthEncoder'
+import { encodeAllRows, type RunSegment } from './runLengthEncoder'
+
+/** 逐行段标签：用真实色号（取自图例，保证与图纸/图例完全一致），如 "A18×3" */
+function rowSegLabel(seg: RunSegment, codeByHex: Map<string, string>): string {
+  if (seg.hex === null) return `空×${seg.count}`
+  const code = codeByHex.get(seg.hex.toUpperCase()) ?? seg.code ?? '—'
+  return `${code}×${seg.count}`
+}
 
 /**
  * 导出（PRD §F6）
@@ -152,8 +159,8 @@ function buildLegendPages(
   const usableH = PAGE_H - MARGIN * 2 - headerH - footerH
   const perPage = Math.max(1, Math.floor(usableH / rowH))
 
-  // 列布局（pt）
-  const COL = { idx: 60, sw: 84, code: 110, name: 165, count: 380, pct: 500 }
+  // 列布局（pt）—— 以「真实色号」为主键，与格子一致，不再有顺序序号列
+  const COL = { sw: 60, code: 100, name: 156, count: 400, pct: 500 }
   const total = legend.reduce((s, it) => s + it.count, 0)
 
   const chunks: LegendItem[][] = []
@@ -175,8 +182,7 @@ function buildLegendPages(
 
     // 表头
     const headY = MARGIN + headerH - 8
-    text(ctx, '序号', COL.idx, headY, { size: 10, color: '#9A9082', align: 'center' })
-    text(ctx, '色块', COL.sw + 8, headY, { size: 10, color: '#9A9082', align: 'center' })
+    text(ctx, '色块', COL.sw + 7, headY, { size: 10, color: '#9A9082', align: 'center' })
     text(ctx, '色号', COL.code, headY, { size: 10, color: '#9A9082' })
     text(ctx, '颜色名称', COL.name, headY, { size: 10, color: '#9A9082' })
     text(ctx, '数量', COL.count, headY, { size: 10, color: '#9A9082', align: 'right' })
@@ -191,7 +197,6 @@ function buildLegendPages(
     // 行
     let y = MARGIN + headerH + 16
     for (const it of chunk) {
-      text(ctx, String(it.index), COL.idx, y, { size: 11, align: 'center', color: '#6B6256', font: MONO_FONT })
       // 色块
       ctx.fillStyle = it.hex
       ctx.strokeStyle = 'rgba(0,0,0,0.12)'
@@ -199,8 +204,9 @@ function buildLegendPages(
       const swSize = 14
       ctx.fillRect(px(COL.sw), px(y - swSize + 2), px(swSize), px(swSize))
       ctx.strokeRect(px(COL.sw), px(y - swSize + 2), px(swSize), px(swSize))
-      text(ctx, it.artkalCode, COL.code, y, { size: 11, font: MONO_FONT, color: '#2B2622' })
-      text(ctx, `${it.name_cn} · ${it.name_en}`, COL.name, y, { size: 11, color: '#2B2622' })
+      text(ctx, it.artkalCode, COL.code, y, { size: 12, weight: '600', font: MONO_FONT, color: '#2B2622' })
+      const nm = [it.name_cn, it.name_en].filter(Boolean).join(' · ')
+      if (nm) text(ctx, nm, COL.name, y, { size: 11, color: '#2B2622' })
       text(ctx, `${it.count} 颗`, COL.count, y, { size: 11, align: 'right', font: MONO_FONT })
       text(ctx, `${it.percentage}%`, COL.pct, y, { size: 11, align: 'right', font: MONO_FONT, color: '#6B6256' })
       y += rowH
@@ -249,7 +255,7 @@ function countLegendPages(legend: LegendItem[]): number {
 
 const GUIDE_LINE_H = 15
 const GUIDE_HEADER_H = 50
-const GUIDE_INDENT = 58
+const GUIDE_INDENT = 108 // 色号序列起始 x（让出左侧「☐ 第 N 行」标签区，避免重叠）
 
 function wrapTokens(ctx: CanvasRenderingContext2D, tokens: string[], maxWpt: number): string[] {
   ctx.font = `${px(10.5)}px ${CJK_FONT}`
@@ -269,7 +275,7 @@ function wrapTokens(ctx: CanvasRenderingContext2D, tokens: string[], maxWpt: num
   return lines.length ? lines : ['（空行）']
 }
 
-function countRowGuidePages(pixels: PixelGrid): number {
+function countRowGuidePages(pixels: PixelGrid, codeByHex: Map<string, string>): number {
   const scratch = document.createElement('canvas').getContext('2d')
   if (!scratch) return 1
   const usableBottom = PAGE_H - MARGIN - 30
@@ -277,7 +283,7 @@ function countRowGuidePages(pixels: PixelGrid): number {
   let pages = 1
   let y = MARGIN + GUIDE_HEADER_H
   for (const segs of encodeAllRows(pixels)) {
-    const lines = wrapTokens(scratch, segs.map(segmentLabel), seqMaxW)
+    const lines = wrapTokens(scratch, segs.map((s) => rowSegLabel(s, codeByHex)), seqMaxW)
     const blockH = lines.length * GUIDE_LINE_H + 6
     if (y + blockH > usableBottom) {
       pages++
@@ -288,7 +294,7 @@ function countRowGuidePages(pixels: PixelGrid): number {
   return pages
 }
 
-function buildRowGuidePages(doc: jsPDF, pixels: PixelGrid, startPageNo: number, pageTotal: number): number {
+function buildRowGuidePages(doc: jsPDF, pixels: PixelGrid, codeByHex: Map<string, string>, startPageNo: number, pageTotal: number): number {
   const usableBottom = PAGE_H - MARGIN - 30
   const seqMaxW = PAGE_W - MARGIN - GUIDE_INDENT
   let pageNo = startPageNo
@@ -316,14 +322,15 @@ function buildRowGuidePages(doc: jsPDF, pixels: PixelGrid, startPageNo: number, 
   }
 
   encodeAllRows(pixels).forEach((segs, i) => {
-    const lines = wrapTokens(page.ctx, segs.map(segmentLabel), seqMaxW)
+    const lines = wrapTokens(page.ctx, segs.map((s) => rowSegLabel(s, codeByHex)), seqMaxW)
     const blockH = lines.length * GUIDE_LINE_H + 6
     if (y + blockH > usableBottom) flush(true)
 
-    text(page.ctx, `第 ${i + 1} 行`, MARGIN, y + 11, { size: 11, weight: '600' })
+    // 勾选框在最左，其后跟「第 N 行」标签，再右侧才是色号序列（三者不重叠）
     page.ctx.strokeStyle = '#C8BAA0'
     page.ctx.lineWidth = px(1.2)
-    page.ctx.strokeRect(px(MARGIN + 40), px(y + 1), px(11), px(11))
+    page.ctx.strokeRect(px(MARGIN), px(y + 1), px(11), px(11))
+    text(page.ctx, `第 ${i + 1} 行`, MARGIN + 18, y + 11, { size: 11, weight: '600' })
     lines.forEach((ln, li) => text(page.ctx, ln, GUIDE_INDENT, y + 11 + li * GUIDE_LINE_H, { size: 10.5, color: '#5C5648' }))
     y += blockH
     page.ctx.strokeStyle = '#F2ECDD'
@@ -344,10 +351,13 @@ export async function exportPDF(
 ): Promise<void> {
   const { jsPDF: JsPDF } = await import('jspdf') // 懒加载：仅在真正导出 PDF 时才拉取 jspdf
   const doc = new JsPDF({ unit: 'pt', format: 'a4', orientation: 'portrait' })
-  const pageTotal = countChartPages(pixels) + countLegendPages(legend) + countRowGuidePages(pixels)
+  // 图例为色号唯一来源（按当前品牌色板生成）；图纸格子、逐行施工表都复用它，三者色号完全一致
+  const codeByHex = new Map<string, string>()
+  for (const it of legend) codeByHex.set(it.hex.toUpperCase(), it.artkalCode)
+  const pageTotal = countChartPages(pixels) + countLegendPages(legend) + countRowGuidePages(pixels, codeByHex)
   const afterChart = buildChartPages(doc, pixels, legend, meta, 1, pageTotal)
   const afterLegend = buildLegendPages(doc, legend, afterChart, pageTotal)
-  buildRowGuidePages(doc, pixels, afterLegend, pageTotal)
+  buildRowGuidePages(doc, pixels, codeByHex, afterLegend, pageTotal)
   doc.save(`拼豆图纸_${meta.cols}x${meta.rows}.pdf`)
 }
 

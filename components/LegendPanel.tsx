@@ -17,19 +17,17 @@ export default function LegendPanel({ legend, onReplace }: Props) {
         <div className="scroll-thin min-h-0 flex-1 overflow-y-auto px-2 pb-3">
           {legend.map((it) => (
             <div key={it.hex} className="flex items-center gap-2 rounded-lg px-1.5 py-1.5 hover:bg-slate-50">
-              <span className="grid h-5 w-5 shrink-0 place-items-center rounded-full bg-slate-100 font-mono text-[10px] text-slate-700">
-                {it.index}
-              </span>
               <span
-                className="h-5 w-5 shrink-0 rounded-md ring-1 ring-black/10"
+                className="h-6 w-6 shrink-0 rounded-md ring-1 ring-black/10"
                 style={{ backgroundColor: it.hex }}
               />
               <div className="min-w-0 flex-1">
                 <div className="flex items-baseline justify-between gap-1">
                   <span className="truncate text-xs text-slate-800">
-                    <span className="font-mono text-slate-600">{it.artkalCode}</span> {it.name_cn}
+                    <span className="font-mono font-semibold text-slate-800">{it.artkalCode}</span>
+                    {it.name_cn ? <span className="text-slate-600"> {it.name_cn}</span> : null}
                   </span>
-                  <span className="shrink-0 font-mono text-[11px] text-slate-700">{it.count}</span>
+                  <span className="shrink-0 font-mono text-[11px] text-slate-700">×{it.count}</span>
                 </div>
                 <div className="mt-1 h-1 overflow-hidden rounded-full bg-slate-100">
                   <span
