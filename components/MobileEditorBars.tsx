@@ -45,11 +45,29 @@ export function MobileTopBar({
 }) {
   const [more, setMore] = useState(false)
   return (
-    <header className="fixed inset-x-0 top-0 z-40 flex h-12 items-center justify-between border-b-2 border-ink bg-slate-0/95 px-1.5 backdrop-blur-sm">
-      <button onClick={onBack} aria-label="返回设置" className="touch-target grid place-items-center rounded-lg text-slate-700 active:bg-slate-100">
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M19 12H5m0 0 7 7m-7-7 7-7" /></svg>
-      </button>
-      <span className="font-display text-base font-extrabold tracking-tight text-ink">PixelBead</span>
+    <header className="fixed inset-x-0 top-0 z-40 flex h-12 items-center justify-between gap-1 border-b-2 border-ink bg-slate-0/95 px-1.5 backdrop-blur-sm">
+      {/* 左：返回 + 网格 + 逐行（直接可点） */}
+      <div className="flex items-center gap-0.5">
+        <button onClick={onBack} aria-label="返回设置" className="touch-target grid place-items-center rounded-lg text-slate-700 active:bg-slate-100">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M19 12H5m0 0 7 7m-7-7 7-7" /></svg>
+        </button>
+        <button
+          onClick={() => setShowGrid(!showGrid)}
+          aria-label="网格显示"
+          className={`touch-target grid place-items-center rounded-lg transition-colors ${showGrid ? 'bg-coral text-white' : 'text-slate-700 active:bg-slate-100'}`}
+        >
+          <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" /><path d="M9 3v18M15 3v18M3 9h18M3 15h18" /></svg>
+        </button>
+        <button
+          onClick={() => setGuideMode(!guideMode)}
+          aria-label="逐行施工指南"
+          className={`touch-target grid place-items-center rounded-lg transition-colors ${guideMode ? 'bg-coral text-white' : 'text-slate-700 active:bg-slate-100'}`}
+        >
+          <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h13M3 12h18M3 18h10" /></svg>
+        </button>
+      </div>
+
+      {/* 右：撤销 / 重做 / 更多（AI 设置 + 导出） */}
       <div className="flex items-center">
         <button onClick={onUndo} disabled={!canUndo} aria-label="撤销" className="touch-target grid place-items-center rounded-lg text-slate-700 active:bg-slate-100 disabled:opacity-30">
           <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 14L4 9l5-5 M4 9h11a5 5 0 0 1 0 10h-1" /></svg>
@@ -65,9 +83,7 @@ export function MobileTopBar({
             <>
               <div className="fixed inset-0 z-[1]" onClick={() => setMore(false)} />
               <div className="absolute right-0 top-full z-[2] mt-1 w-44 overflow-hidden rounded-xl border-2 border-ink bg-slate-0 shadow-pop animate-pop-in">
-                <MenuItem label="网格显示" active={showGrid} onClick={() => { setShowGrid(!showGrid); setMore(false) }} />
-                <MenuItem label="逐行施工指南" active={guideMode} onClick={() => { setGuideMode(!guideMode); setMore(false) }} />
-                <button onClick={() => { onSettings(); setMore(false) }} className="flex w-full items-center gap-2 border-t border-slate-100 px-3.5 py-3 text-left text-sm text-slate-800 active:bg-slate-50">
+                <button onClick={() => { onSettings(); setMore(false) }} className="flex w-full items-center gap-2 px-3.5 py-3 text-left text-sm text-slate-800 active:bg-slate-50">
                   ⚙️ AI 服务设置
                 </button>
                 <button onClick={() => { onExport(); setMore(false) }} className="flex w-full items-center gap-2 border-t border-slate-100 px-3.5 py-3 text-left text-sm font-bold text-coral active:bg-slate-50">
@@ -80,15 +96,6 @@ export function MobileTopBar({
         </div>
       </div>
     </header>
-  )
-}
-
-function MenuItem({ label, active, onClick }: { label: string; active: boolean; onClick: () => void }) {
-  return (
-    <button onClick={onClick} className="flex w-full items-center justify-between px-3.5 py-3 text-left text-sm text-slate-800 active:bg-slate-50">
-      {label}
-      <span className={`h-4 w-4 rounded-full border-2 ${active ? 'border-coral bg-coral' : 'border-slate-300'}`} />
-    </button>
   )
 }
 

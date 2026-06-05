@@ -13,12 +13,14 @@ import {
 } from '@/utils/imageProcessor'
 import PixelPreview from '@/components/PixelPreview'
 import BrandMark from '@/components/BrandMark'
+import { useIsMobile } from '@/hooks/useMediaQuery'
 import { removeBg, type BgProgress } from '@/utils/bgRemoval'
 import type { PixelGrid } from '@/types'
 
 export default function ConvertPage() {
   const { state, dispatch } = useProject()
   const router = useRouter()
+  const isMobile = useIsMobile()
 
   const imgRef = useRef<HTMLImageElement | null>(null)
   const ratioRef = useRef(1)
@@ -194,6 +196,92 @@ export default function ConvertPage() {
         </div>
       )}
 
+      {isMobile ? (
+        <>
+          {/* 手机端：单列、正常文档流、整段可纵向滚动；确认按钮固定底部 */}
+          <div className="flex-1 space-y-4 overflow-y-auto p-3">
+            {/* 1. 原图 */}
+            <Panel label="原图" className="max-h-[34vh] w-full shrink-0" badge={imgReady ? `${imgRef.current?.naturalWidth}×${imgRef.current?.naturalHeight}px` : ''}>
+              <div className="relative flex h-full w-full items-center justify-center">
+                {(processedSrc || sourceImage) && (
+                  <img src={bgRemove ? (processedSrc ?? sourceImage)! : sourceImage!} alt="原图" className="max-h-full max-w-full rounded-lg object-contain shadow-craft" />
+                )}
+                {bgBusy && (
+                  <div className="absolute inset-0 grid place-items-center rounded-lg bg-paper-100/80 backdrop-blur-sm">
+                    <span className="flex flex-col items-center gap-2 rounded-bead bg-ink/85 px-4 py-3 text-sm text-paper-50">
+                      <span className="flex items-center gap-2">
+                        <span className="h-3.5 w-3.5 rounded-full border-2 border-paper-50/40 border-t-paper-50 animate-bead-spin" />
+                        {bgProgress?.phase === 'download' ? `下载抠图模型 ${bgProgress.percent}%` : '正在抠图…'}
+                      </span>
+                      {bgProgress?.phase === 'download' && <span className="text-[11px] text-paper-50/70">首次使用需下载模型（约 67MB），之后会缓存</span>}
+                    </span>
+                  </div>
+                )}
+              </div>
+            </Panel>
+
+            {/* 2. 模式切换 + 像素/烫后预览 */}
+            <div className="flex flex-col gap-2">
+              <div className="flex items-center justify-between gap-2">
+                <div className="inline-flex rounded-xl border-2 border-ink bg-paper-200 p-1">
+                  <button type="button" onClick={() => setPreviewMode('pixel')} className={`min-h-[40px] rounded-lg px-3 text-xs font-bold transition-colors ${previewMode === 'pixel' ? 'bg-ink text-paper-50' : 'text-ink-soft'}`}>像素图纸</button>
+                  <button type="button" onClick={() => setPreviewMode('ironed')} className={`min-h-[40px] rounded-lg px-3 text-xs font-bold transition-colors ${previewMode === 'ironed' ? 'bg-ink text-paper-50' : 'text-ink-soft'}`}>烫后效果</button>
+                </div>
+                <span className="font-mono text-xs text-ink-soft">{cols}×{rows} · 约 {beadCount ?? '…'} 颗</span>
+              </div>
+              <Panel label="像素效果" className="max-h-[34vh] w-full shrink-0" accent>
+                <PixelPreview pixels={grid} ironed={previewMode === 'ironed'} computing={computing} />
+              </Panel>
+              {previewMode === 'ironed' && <p className="text-center text-[11px] text-ink-faint">烫后效果为模拟预览，实际成品因豆子品牌、熨烫程度略有差异</p>}
+            </div>
+
+            {/* 3. 预处理开关 */}
+            <div className="card-soft space-y-2.5 px-4 py-3">
+              <Toggle checked={bgRemove} onChange={setBgRemove} label="智能去背景" hint={bgBusy ? (bgProgress?.phase === 'download' ? `下载模型 ${bgProgress.percent}%…` : '正在抠图…') : '可选 · 本地 AI 抠主体（首次需下载约 67MB）'} busy={bgBusy} />
+              <Toggle checked={denoise} onChange={setDenoise} label="降噪（默认关闭）" hint="照片噪点多可开启（中值滤波保边），但可能轻微影响清晰度" />
+              <Toggle checked={enhance} onChange={setEnhance} label="色彩增强" hint="提升对比与饱和，成品更鲜艳（照片偏灰时尤其有效）" />
+              {bgError && <p className="text-xs text-coral-dark">{bgError}</p>}
+            </div>
+
+            {/* 4. 精细度 + 颜色数量 滑块 */}
+            <div className="card-soft space-y-3 px-4 py-3">
+              <div>
+                <div className="mb-1.5 flex items-center justify-between gap-3 text-sm">
+                  <span className="text-ink-soft">图案精细度（最长边）</span>
+                  <span className="font-mono text-ink">宽 <b>{cols}</b> × 高 <b>{rows}</b> 格</span>
+                </div>
+                <input type="range" min={16} max={256} value={longestSide} onChange={(e) => setLongest(Number(e.target.value))} className="h-2 w-full cursor-pointer appearance-none rounded-bead bg-paper-300 accent-coral" />
+              </div>
+              <SliderRow label="颜色数量" value={colorCount} min={6} max={30} onChange={(v) => dispatch({ type: 'SET_COLOR_COUNT', payload: v })} suffix={`${colorCount} 色`} />
+            </div>
+
+            {/* 5. 尺寸信息卡 */}
+            <div className="card-soft space-y-1 px-4 py-3">
+              <div className="flex items-center gap-1.5 text-sm font-medium text-ink"><span>📐</span> 成品尺寸约 {widthCm} × {heightCm} cm</div>
+              <div className="text-xs text-ink-soft">{cols} × {rows} 格 · 🧩 约 {boards} 块拼盘（29×29）</div>
+              <div className="text-xs text-ink-soft">🔴 {beadCount === null ? '计算中…' : `约 ${beadCount} 颗豆子`}</div>
+              <div className="text-xs text-ink-soft">⏱ 预计制作 {beadCount === null ? '计算中…' : formatBuildTime(beadCount)}<span className="text-ink-faint">（参考值，因人而异）</span></div>
+            </div>
+
+            {/* 6. 大尺寸提醒 */}
+            {longestSide >= 180 ? (
+              <div className="rounded-xl border-2 border-ink bg-coral/25 px-4 py-2.5 text-xs leading-snug text-ink">⚠️ 尺寸非常大，新手不建议从这个尺寸开始。制作可能需要数十小时，建议先用小尺寸试做，或确认你有足够的拼盘和豆子。</div>
+            ) : longestSide >= 100 ? (
+              <div className="rounded-xl border-2 border-ink bg-sun/40 px-4 py-2.5 text-xs leading-snug text-ink">⚠️ 这是大型作品，需约 {boards} 块拼盘{beadCount !== null ? `、约 ${beadCount} 颗豆子` : ''}，制作耗时较长，请确认材料充足。</div>
+            ) : null}
+          </div>
+
+          {/* 确认按钮：固定底部 + iPhone 安全区 */}
+          <div className="shrink-0 border-t-2 border-ink bg-paper-50 px-3 pt-3" style={{ paddingBottom: 'calc(10px + env(safe-area-inset-bottom))' }}>
+            <button onClick={confirm} disabled={empty || computing} className="btn-cta min-h-[48px] w-full justify-center whitespace-nowrap">
+              确认，进入编辑
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12h14m0 0-7-7m7 7-7 7" /></svg>
+            </button>
+            {empty && !computing && <p className="mt-1.5 text-center text-xs text-coral-dark">图片可能全为透明区域，请返回检查后重试。</p>}
+          </div>
+        </>
+      ) : (
+        <>
       <main className="grid min-h-0 flex-1 grid-cols-1 gap-4 overflow-auto p-3 sm:p-5 md:grid-cols-2">
         {/* 左：原图预览 + 预处理开关 */}
         <div className="flex min-h-0 flex-col gap-3">
@@ -340,6 +428,8 @@ export default function ConvertPage() {
           <p className="mx-auto mt-2 max-w-4xl text-center text-xs text-coral-dark">图片可能全为透明区域，请返回检查后重试。</p>
         )}
       </footer>
+        </>
+      )}
     </div>
   )
 }
