@@ -18,18 +18,17 @@ interface Props {
   brushSize?: number // 画笔/橡皮笔刷尺寸 1/2/3（功能3）
   completedRows?: Set<number> // 已完成行绿蒙层（功能6）
   panMode?: boolean // 手型/空格 平移模式：不绘制（模块2）
-  scale?: number // 当前 CSS 缩放（仅用于决定色号文字在缩小时是否隐藏，§5.3）
 }
 
 function clone(grid: PixelGrid): PixelGrid {
   return grid.map((row) => row.slice())
 }
 
-const RENDER_LIMIT = 8192 // 画布缓冲区单边上限，超采样倍率据此夹紧（大图安全）
+const RENDER_LIMIT = 8192 // 画布缓冲区单边上限（编辑器页已据此夹紧 renderCell，这里再兜底一次）
 
 /**
- * 编辑器图纸绘制：在 renderGrid 基础上加「高清超采样 + 拼盘分区线 + 缩小时隐藏色号」。
- * pixelRatio = min(dpr×2, 上限/像素宽)，让放大后清晰且大图不爆缓冲区。
+ * 编辑器图纸绘制：缩放=重绘——cellSize 已是「目标缩放后的格子大小」，按它 + 设备像素比(DPR)
+ * 重画整图（矢量文字 + 纯色格），放大后清晰；不再做 CSS 拉伸。再加拼盘分区线、缩小时隐藏色号。
  */
 function drawEditor(
   canvas: HTMLCanvasElement,
@@ -40,14 +39,13 @@ function drawEditor(
     legendMap?: Map<string, string>
     completedRows?: Set<number>
     selectedRow?: number | null
-    scale?: number
   },
 ): void {
   const cols = grid[0]?.length ?? 0
   if (!cols) return
-  const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1
-  const pr = Math.max(1, Math.min(dpr * 2, Math.floor(RENDER_LIMIT / (cols * o.cellSize))))
-  const showText = o.cellSize * (o.scale ?? 1) >= 14 // 缩小到每格 <14px 时隐藏色号，放大后再显示
+  const dpr = typeof window !== 'undefined' ? Math.min(window.devicePixelRatio || 1, 3) : 1
+  const pr = Math.max(1, Math.min(dpr, Math.floor(RENDER_LIMIT / (cols * o.cellSize))))
+  const showText = o.cellSize >= 14 // 每格 <14px 时隐藏色号（太小看不清），放大后自动显示
   renderGrid(canvas, grid, o.cellSize, o.showGrid, showText ? o.legendMap : undefined, {
     completedRows: o.completedRows,
     selectedRow: o.selectedRow,
@@ -113,7 +111,6 @@ export default function EditorCanvas({
   brushSize,
   completedRows,
   panMode,
-  scale = 1,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const workRef = useRef<PixelGrid>(pixels)
@@ -122,20 +119,16 @@ export default function EditorCanvas({
   const rafRef = useRef<number | null>(null)
 
   // 设置项放入 ref，避免在一笔绘制过程中因闭包过期取到旧值
-  const cfg = useRef({ cellSize, showGrid, legendMap, tool, color, onCommit, onPickColor, guideMode, onSelectRow, selectedRow, brushSize, completedRows, panMode, scale })
-  cfg.current = { cellSize, showGrid, legendMap, tool, color, onCommit, onPickColor, guideMode, onSelectRow, selectedRow, brushSize, completedRows, panMode, scale }
+  const cfg = useRef({ cellSize, showGrid, legendMap, tool, color, onCommit, onPickColor, guideMode, onSelectRow, selectedRow, brushSize, completedRows, panMode })
+  cfg.current = { cellSize, showGrid, legendMap, tool, color, onCommit, onPickColor, guideMode, onSelectRow, selectedRow, brushSize, completedRows, panMode }
 
-  // 缩小到每格 <14px 时隐藏色号 → 仅在跨过阈值时重绘，避免缩放途中频繁整图重绘
-  const textOn = cellSize * scale >= 14
-
-  // 已提交像素变化（转换进入 / 撤销 / 重做 / 提交后）/ 选中行变化 → 同步 workRef 并整体重绘
+  // 已提交像素变化（转换进入 / 撤销 / 重做 / 提交后）/ 选中行变化 / 缩放（cellSize 改变）→ 同步 workRef 并整体重绘
   useEffect(() => {
     if (drawingRef.current) return
     workRef.current = pixels
     const canvas = canvasRef.current
-    if (canvas) drawEditor(canvas, pixels, { cellSize, showGrid, legendMap, completedRows, selectedRow, scale })
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pixels, cellSize, showGrid, legendMap, completedRows, selectedRow, textOn])
+    if (canvas) drawEditor(canvas, pixels, { cellSize, showGrid, legendMap, completedRows, selectedRow })
+  }, [pixels, cellSize, showGrid, legendMap, completedRows, selectedRow])
 
   const scheduleRender = () => {
     if (rafRef.current != null) return

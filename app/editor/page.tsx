@@ -368,8 +368,17 @@ export default function EditorPage() {
   }
 
   const meta = { cols: pixels[0]?.length ?? 0, rows: pixels.length }
-  const naturalW = meta.cols * CELL_SIZE
-  const naturalH = meta.rows * CELL_SIZE
+  // 缩放=重绘（不是 CSS 拉伸）：cellSize 跟随 scale 变大、整图按更高分辨率重画，放大后清晰。
+  // renderCell 取整像素作为「重绘档位」；零头用一个≈1 的 residual CSS 缩放补平，保证缩放视觉顺滑。
+  // 画布缓冲区 = cols×renderCell×dpr，用 maxCell 夹紧避免超大图爆缓冲区（此时极限放大才退化为 CSS 拉伸）。
+  const dpr = typeof window !== 'undefined' ? Math.min(window.devicePixelRatio || 1, 3) : 1
+  const MAX_CANVAS = 8192
+  const targetCell = CELL_SIZE * scale
+  const maxCell = Math.max(CELL_SIZE, Math.floor(MAX_CANVAS / (Math.max(1, meta.cols, meta.rows) * dpr)))
+  const renderCell = Math.max(1, Math.min(Math.round(targetCell), maxCell))
+  const residual = targetCell / renderCell // ≈1（仅大图夹紧后极限放大才 >1）
+  const naturalW = meta.cols * renderCell
+  const naturalH = meta.rows * renderCell
 
   const doExportPDF = async () => {
     setExportError(null)
@@ -480,13 +489,13 @@ export default function EditorPage() {
           style={{
             width: naturalW,
             height: naturalH,
-            transform: `translate(${translateX}px, ${translateY}px) scale(${scale})`,
+            transform: `translate(${translateX}px, ${translateY}px) scale(${residual})`,
             transformOrigin: 'center',
           }}
         >
           <EditorCanvas
             pixels={pixels}
-            cellSize={CELL_SIZE}
+            cellSize={renderCell}
             showGrid={showGrid}
             legendMap={legendMap}
             tool={tool}
@@ -499,7 +508,6 @@ export default function EditorPage() {
             brushSize={brushSize}
             completedRows={completedRows}
             panMode={panMode}
-            scale={scale}
           />
         </div>
       </div>
