@@ -63,18 +63,22 @@ function getPaletteRGB(palette: ColorEntry[]): PaletteRGB[] {
   return cached
 }
 
-function nearestInPalette(r: number, g: number, b: number, pal: PaletteRGB[]): string {
-  let best = pal[0].hex
+function nearestEntry(r: number, g: number, b: number, pal: PaletteRGB[]): PaletteRGB {
+  let best = pal[0]
   let bestD = Infinity
   for (let i = 0; i < pal.length; i++) {
     const p = pal[i]
     const d = perceptualDistSq(r, g, b, p.r, p.g, p.b)
     if (d < bestD) {
       bestD = d
-      best = p.hex
+      best = p
     }
   }
   return best
+}
+
+function nearestInPalette(r: number, g: number, b: number, pal: PaletteRGB[]): string {
+  return nearestEntry(r, g, b, pal).hex
 }
 
 /** 将任意 RGB snap 到最近的 Artkal 标准色，返回其 hex（PRD §8.3 接口） */
@@ -186,17 +190,18 @@ export function medianFilter(imageData: ImageData): ImageData {
 // ---------- Step 1–3：缩放 + 提取 + snap ----------
 
 /**
- * 图片 → 全保真 Artkal 像素网格（PRD §F2 Step 1–3）
- * 此处不做颜色种数控制，种数控制交给 quantizeColors（Step 4）。
+ * Step 1–2：把源图缩放到目标格数，返回 RGBA 像素数据。
+ * - denoise：先绘到「封顶中间分辨率」画布 → 3×3 中值滤波（去噪保边）→ 再缩放到目标格数。
+ * - enhance：snap 前就地提升对比 + 饱和，成品更鲜艳。
+ * convertImage（全保真 snap）与 processImageToGrid（含抖动）共用，避免重复光栅化。
  */
-export function convertImage(
+function rasterize(
   img: HTMLImageElement,
   cols: number,
   rows: number,
-  palette: ColorEntry[],
-  denoise = false,
-  enhance = false,
-): PixelGrid {
+  denoise: boolean,
+  enhance: boolean,
+): Uint8ClampedArray {
   const canvas = document.createElement('canvas')
   canvas.width = cols
   canvas.height = rows
@@ -208,7 +213,6 @@ export function convertImage(
 
   // Step 1：缩放到目标格数。
   // - 降噪开启：先把源图绘到「封顶中间分辨率」画布 A → 3×3 中值滤波（去噪保边）→ 再缩放到目标格数。
-  //   （已删除原先的高斯模糊与转换后的孤立像素清除，避免削平/误删眼睛等小细节）
   // - 降噪关闭：源图直接缩放到目标格数（最清晰）。
   if (denoise && img.naturalWidth > 0) {
     const maxInter = 600
@@ -240,6 +244,22 @@ export function convertImage(
   // Step 2：提取每像素 RGBA（可选：snap 前做色彩增强，让成品更鲜艳）
   const { data } = ctx.getImageData(0, 0, cols, rows)
   if (enhance) enhancePixels(data)
+  return data
+}
+
+/**
+ * 图片 → 全保真 Artkal 像素网格（PRD §F2 Step 1–3）
+ * 此处不做颜色种数控制，种数控制交给 quantizeColors（Step 4）。
+ */
+export function convertImage(
+  img: HTMLImageElement,
+  cols: number,
+  rows: number,
+  palette: ColorEntry[],
+  denoise = false,
+  enhance = false,
+): PixelGrid {
+  const data = rasterize(img, cols, rows, denoise, enhance)
   const pal = getPaletteRGB(palette)
   const grid: PixelGrid = []
 
@@ -247,8 +267,7 @@ export function convertImage(
     const row: (string | null)[] = []
     for (let x = 0; x < cols; x++) {
       const i = (y * cols + x) * 4
-      const a = data[i + 3]
-      if (a < ALPHA_THRESHOLD) {
+      if (data[i + 3] < ALPHA_THRESHOLD) {
         row.push(null) // 空白格
       } else {
         // Step 3：感知加权距离匹配最近 Artkal 色
@@ -363,13 +382,79 @@ export function quantizeColors(
   }
 }
 
+// ---------- 抖动：Floyd–Steinberg 误差扩散 ----------
+
+/**
+ * 将「缩放后的 RGBA 像素」用 Floyd–Steinberg 误差扩散，量化到给定的颜色集合 active。
+ * active = 经颜色数上限筛选后的调色板子集（与不抖动版本最终用色一致）。
+ * 误差只在不透明像素间扩散；透明像素输出 null 且不参与扩散。
+ * 用浮点缓冲累积误差，避免 8bit 截断；逐像素串行，O(cols·rows·|active|)。
+ */
+function ditherToActive(
+  data: Uint8ClampedArray,
+  cols: number,
+  rows: number,
+  active: PaletteRGB[],
+): PixelGrid {
+  const n = cols * rows
+  const fr = new Float32Array(n)
+  const fg = new Float32Array(n)
+  const fb = new Float32Array(n)
+  const opaque = new Uint8Array(n)
+  for (let i = 0; i < n; i++) {
+    if (data[i * 4 + 3] < ALPHA_THRESHOLD) continue
+    opaque[i] = 1
+    fr[i] = data[i * 4]
+    fg[i] = data[i * 4 + 1]
+    fb[i] = data[i * 4 + 2]
+  }
+
+  const grid: PixelGrid = []
+  for (let y = 0; y < rows; y++) {
+    const row: (string | null)[] = []
+    for (let x = 0; x < cols; x++) {
+      const idx = y * cols + x
+      if (!opaque[idx]) {
+        row.push(null)
+        continue
+      }
+      const r = fr[idx]
+      const g = fg[idx]
+      const b = fb[idx]
+      const near = nearestEntry(r, g, b, active)
+      row.push(near.hex)
+      const er = r - near.r
+      const eg = g - near.g
+      const eb = b - near.b
+      // 误差扩散：右 7/16、左下 3/16、下 5/16、右下 1/16
+      const spread = (dx: number, dy: number, f: number) => {
+        const nx = x + dx
+        const ny = y + dy
+        if (nx < 0 || nx >= cols || ny < 0 || ny >= rows) return
+        const j = ny * cols + nx
+        if (!opaque[j]) return
+        fr[j] += er * f
+        fg[j] += eg * f
+        fb[j] += eb * f
+      }
+      spread(1, 0, 7 / 16)
+      spread(-1, 1, 3 / 16)
+      spread(0, 1, 5 / 16)
+      spread(1, 1, 1 / 16)
+    }
+    grid.push(row)
+  }
+  return grid
+}
+
 // ---------- 编排：图片 → 最终图纸 ----------
 // （原 cleanupIsolated「孤立像素清除」已删除：它把眼睛/细线等重要小细节当噪点误删，得不偿失。）
 
 /**
- * 便捷编排：convertImage(Step1-3) → quantizeColors(Step4)，转换设置页 / AI 复用。
- * denoise 开启时：缩放前对源图做 3×3 中值滤波（convertImage 内，去噪同时保留边缘）。
- * 已移除原先「转换前高斯模糊 + 转换后孤立像素清除」——后者会把眼睛/细线当噪点误删。
+ * 便捷编排：rasterize(Step1-2) → snap(Step3) → quantizeColors(Step4)[→ 可选抖动]，转换设置页 / AI 复用。
+ * denoise 开启时：缩放前对源图做 3×3 中值滤波（rasterize 内，去噪同时保留边缘）。
+ * dither 开启时：先用 quantizeColors 定下「可用颜色集合」，再对缩放后的像素做 Floyd–Steinberg
+ *   误差扩散量化到该集合，让有限颜色模拟更丰富的过渡（星空 / 肤色等渐变不断层）。
  */
 export function processImageToGrid(
   img: HTMLImageElement,
@@ -379,9 +464,32 @@ export function processImageToGrid(
   palette: ColorEntry[],
   denoise = false,
   enhance = false,
+  dither = false,
 ): PixelGrid {
-  const full = convertImage(img, cols, rows, palette, denoise, enhance)
-  return quantizeColors(full, colorCount, palette)
+  const data = rasterize(img, cols, rows, denoise, enhance)
+  const pal = getPaletteRGB(palette)
+
+  // Step 3：全保真 snap → 网格
+  const full: PixelGrid = []
+  for (let y = 0; y < rows; y++) {
+    const r: (string | null)[] = []
+    for (let x = 0; x < cols; x++) {
+      const i = (y * cols + x) * 4
+      r.push(data[i + 3] < ALPHA_THRESHOLD ? null : nearestInPalette(data[i], data[i + 1], data[i + 2], pal))
+    }
+    full.push(r)
+  }
+
+  // Step 4：颜色种数控制（k-means 聚类回 snap），确定最终用色集合
+  const reduced = quantizeColors(full, colorCount, palette)
+  if (!dither) return reduced
+
+  // 抖动：以 reduced 的实际用色为「可用颜色集合」，对缩放后像素做误差扩散
+  const activeHex = new Set<string>()
+  for (const row of reduced) for (const cell of row) if (cell) activeHex.add(cell)
+  if (activeHex.size === 0) return reduced
+  const active: PaletteRGB[] = [...activeHex].map((hex) => ({ hex, ...hexToRgb(hex) }))
+  return ditherToActive(data, cols, rows, active)
 }
 
 /** 判断网格是否全空（用于异常处理：图片全透明 / 转换后全空） */

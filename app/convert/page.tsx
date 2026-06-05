@@ -37,6 +37,7 @@ export default function ConvertPage() {
   const [bgRemove, setBgRemove] = useState(false)
   const [denoise, setDenoise] = useState(false)
   const [enhance, setEnhance] = useState(true)
+  const [dither, setDither] = useState(true) // 抖动（误差扩散）：默认开，渐变更自然；纯色卡通可关
   const [processedSrc, setProcessedSrc] = useState<string | null>(null)
   const [bgBusy, setBgBusy] = useState(false)
   const [bgProgress, setBgProgress] = useState<BgProgress | null>(null)
@@ -132,12 +133,12 @@ export default function ConvertPage() {
     if (!imgReady || !imgRef.current) return
     setComputing(true)
     const t = setTimeout(() => {
-      const g = processImageToGrid(imgRef.current!, cols, rows, colorCount, colors, denoise, enhance)
+      const g = processImageToGrid(imgRef.current!, cols, rows, colorCount, colors, denoise, enhance, dither)
       setGrid(g)
       setComputing(false)
     }, 300)
     return () => clearTimeout(t)
-  }, [imgReady, imgVersion, cols, rows, colorCount, denoise, enhance, colors])
+  }, [imgReady, imgVersion, cols, rows, colorCount, denoise, enhance, dither, colors])
 
   const empty = useMemo(() => (grid ? isGridEmpty(grid) : true), [grid])
   // 豆子数：null = 尚未算出（首次防抖转换前），信息卡据此显示「计算中」
@@ -259,6 +260,7 @@ export default function ConvertPage() {
               <Toggle checked={bgRemove} onChange={setBgRemove} label="智能去背景" hint={bgBusy ? (bgProgress?.phase === 'download' ? `下载模型 ${bgProgress.percent}%…` : '正在抠图…') : '可选 · 本地 AI 抠主体（首次需下载约 67MB）'} busy={bgBusy} />
               <Toggle checked={denoise} onChange={setDenoise} label="降噪（默认关闭）" hint="照片噪点多可开启（中值滤波保边），但可能轻微影响清晰度" />
               <Toggle checked={enhance} onChange={setEnhance} label="色彩增强" hint="提升对比与饱和，成品更鲜艳（照片偏灰时尤其有效）" />
+              <Toggle checked={dither} onChange={setDither} label="抖动（误差扩散）" hint="用有限色号模拟更丰富的过渡，渐变更自然不断层；纯色卡通图案可关" />
               {bgError && <p className="text-xs text-coral-dark">{bgError}</p>}
             </div>
 
@@ -271,7 +273,7 @@ export default function ConvertPage() {
                 </div>
                 <input type="range" min={16} max={256} value={longestSide} onChange={(e) => setLongest(Number(e.target.value))} className="h-2 w-full cursor-pointer appearance-none rounded-bead bg-paper-300 accent-coral" />
               </div>
-              <SliderRow label="颜色数量" value={colorCount} min={6} max={30} onChange={(v) => dispatch({ type: 'SET_COLOR_COUNT', payload: v })} suffix={`${colorCount} 色`} />
+              <SliderRow label="颜色数量" value={colorCount} min={6} max={200} onChange={(v) => dispatch({ type: 'SET_COLOR_COUNT', payload: v })} suffix={`${colorCount} 色`} />
             </div>
 
             {/* 5. 尺寸信息卡 */}
@@ -352,6 +354,7 @@ export default function ConvertPage() {
             />
             <Toggle checked={denoise} onChange={setDenoise} label="降噪（默认关闭）" hint="照片噪点多时可开启（中值滤波保边，不删细节），但可能轻微影响清晰度" />
             <Toggle checked={enhance} onChange={setEnhance} label="色彩增强" hint="提升对比与饱和，成品更鲜艳好看（照片偏灰时尤其有效）" />
+            <Toggle checked={dither} onChange={setDither} label="抖动（误差扩散）" hint="用有限色号模拟更丰富的过渡，渐变更自然不断层；纯色卡通图案可关" />
             {bgError && <p className="text-xs text-coral-dark">{bgError}</p>}
           </div>
 
@@ -434,7 +437,7 @@ export default function ConvertPage() {
 
           {/* 颜色数量 + 确认 */}
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:gap-6">
-            <SliderRow label="颜色数量" value={colorCount} min={6} max={30} onChange={(v) => dispatch({ type: 'SET_COLOR_COUNT', payload: v })} suffix={`${colorCount} 色`} className="flex-1" />
+            <SliderRow label="颜色数量" value={colorCount} min={6} max={200} onChange={(v) => dispatch({ type: 'SET_COLOR_COUNT', payload: v })} suffix={`${colorCount} 色`} className="flex-1" />
             <button onClick={confirm} disabled={empty || computing} className="btn-cta min-h-[48px] w-full justify-center whitespace-nowrap sm:w-auto">
               确认，进入编辑
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">

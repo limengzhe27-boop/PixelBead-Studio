@@ -36,7 +36,7 @@ export interface ProjectState {
   /** 转换参数 */
   cols: number // 宽度格数，默认 32
   rows: number // 高度格数，随比例联动
-  colorCount: number // 颜色数量，默认 12
+  colorCount: number // 颜色数量，默认 48（上限 200，让照片有足够颜色还原）
   lockAspect: boolean // 是否锁定宽高比（默认开启）
 
   /** 当前像素数据（编辑器操作的核心数据） */
@@ -56,7 +56,7 @@ export const initialState: ProjectState = {
   sourceImage: null,
   cols: 32,
   rows: 32,
-  colorCount: 12,
+  colorCount: 48,
   lockAspect: true,
   pixels: null,
   history: [],
