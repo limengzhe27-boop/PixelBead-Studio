@@ -1,4 +1,9 @@
+'use client'
+
 import { useCallback, useRef, useState } from 'react'
+import dynamic from 'next/dynamic'
+
+const CropModal = dynamic(() => import('@/components/CropModal'), { ssr: false }) // 按需懒加载，不拖慢首屏
 
 const MAX_SIZE = 20 * 1024 * 1024 // 20MB
 const ACCEPT = 'image/png,image/jpeg,image/gif,image/webp,image/svg+xml'
@@ -7,12 +12,17 @@ interface Props {
   onImage: (dataUrl: string) => void
 }
 
-/** 图片上传区（PRD §F1 / §11）：拖拽 + 点击，本地处理不上传服务器 */
+/** 图片上传区（PRD §F1 / §11）：拖拽 + 点击 → 可选裁剪 → 转换，本地处理不上传服务器 */
 export default function UploadZone({ onImage }: Props) {
   const inputRef = useRef<HTMLInputElement>(null)
   const [dragging, setDragging] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false) // 读取大图 + 跳转期间给即时反馈，避免“点了没反应”
+  const [cropSrc, setCropSrc] = useState<string | null>(null) // 待裁剪的图片 dataURL（非空即弹出裁剪框）
+
+  const resetInput = () => {
+    if (inputRef.current) inputRef.current.value = '' // 复位，确保同一文件可再次选择
+  }
 
   const handleFile = useCallback(
     (file: File | undefined) => {
@@ -28,14 +38,17 @@ export default function UploadZone({ onImage }: Props) {
       setError(null)
       setLoading(true)
       const reader = new FileReader()
-      reader.onload = () => onImage(reader.result as string) // 跳转后本组件卸载，无需复位 loading
+      reader.onload = () => {
+        setLoading(false)
+        setCropSrc(reader.result as string) // 读完弹裁剪框（可跳过），裁好/跳过后再 onImage 跳转
+      }
       reader.onerror = () => {
         setError('读取文件失败，请重试')
         setLoading(false)
       }
       reader.readAsDataURL(file)
     },
-    [onImage],
+    [],
   )
 
   return (
@@ -109,6 +122,19 @@ export default function UploadZone({ onImage }: Props) {
           </svg>
           {error}
         </p>
+      )}
+
+      {cropSrc && (
+        <CropModal
+          src={cropSrc}
+          hint="裁掉多余背景能让图纸更聚焦主体；也可直接「跳过裁剪」用整张图。"
+          onConfirm={(cropped) => onImage(cropped)} /* 跳转后本组件卸载，无需复位 */
+          onSkip={() => onImage(cropSrc)}
+          onCancel={() => {
+            setCropSrc(null)
+            resetInput()
+          }}
+        />
       )}
     </div>
   )

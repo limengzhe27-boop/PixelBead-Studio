@@ -1,12 +1,15 @@
 'use client'
 
 import { useRef, useState } from 'react'
+import dynamic from 'next/dynamic'
 import { useRouter } from 'next/navigation'
 import { useProject } from '@/context/ProjectContext'
-import { compressToBase64, fileToDataURL } from '@/utils/imageCompressor'
+import { compressDataURLToBase64, fileToDataURL } from '@/utils/imageCompressor'
 import { loadImage, recommendDimensions } from '@/utils/imageProcessor'
 import { hasProvider, headersFor } from '@/utils/providerConfig'
 import { useSettings } from '@/context/SettingsContext'
+
+const CropModal = dynamic(() => import('@/components/CropModal'), { ssr: false }) // 按需懒加载
 
 const MAX_SIZE = 20 * 1024 * 1024
 
@@ -19,24 +22,32 @@ export default function ColorRecognizer() {
   const { dispatch } = useProject()
   const { openSettings } = useSettings()
   const inputRef = useRef<HTMLInputElement>(null)
-  const [file, setFile] = useState<File | null>(null)
+  const [pendingCrop, setPendingCrop] = useState<string | null>(null) // 待裁剪图 dataURL（非空即弹裁剪框）
+  const [src, setSrc] = useState('') // 裁剪/跳过后用于识别 + 进编辑器的完整 dataURL
   const [preview, setPreview] = useState('')
   const [loading, setLoading] = useState(false)
   const [status, setStatus] = useState('')
   const [error, setError] = useState('')
   const [goSettings, setGoSettings] = useState(false)
 
-  const pick = (f?: File) => {
+  const resetInput = () => {
+    if (inputRef.current) inputRef.current.value = ''
+  }
+
+  const pick = async (f?: File) => {
     if (!f) return
     if (!f.type.startsWith('image/')) return setError('请上传图片格式文件')
     if (f.size > MAX_SIZE) return setError('图片过大，请压缩至 20MB 以内')
     setError('')
-    setFile(f)
-    setPreview(URL.createObjectURL(f))
+    try {
+      setPendingCrop(await fileToDataURL(f)) // 先弹裁剪框（可跳过），裁好/跳过后再识别
+    } catch {
+      setError('读取图片失败，请重试')
+    }
   }
 
   const recognize = async () => {
-    if (!file || loading) return
+    if (!src || loading) return
     setGoSettings(false)
     if (!hasProvider('vision')) {
       setError('成品转图纸需要配置「视觉模型」（推荐阿里云百炼 Qwen-VL，有免费额度）')
@@ -47,8 +58,8 @@ export default function ColorRecognizer() {
     setError('')
     try {
       setStatus('正在处理图片…')
-      const compressed = await compressToBase64(file, 800)
-      const original = await fileToDataURL(file)
+      const original = src // 裁剪后的完整 dataURL
+      const compressed = await compressDataURLToBase64(original, 800)
       const img = await loadImage(original)
 
       // 视觉模型估算作品格数（它能胜任的轻任务；失败则用默认目标边长 48 兜底）
@@ -144,6 +155,28 @@ export default function ColorRecognizer() {
         </div>
       )}
       <input ref={inputRef} type="file" accept="image/*" className="hidden" onChange={(e) => pick(e.target.files?.[0])} />
+
+      {pendingCrop && (
+        <CropModal
+          src={pendingCrop}
+          title="裁剪成品照片"
+          hint="裁掉桌面 / 背景、只留拼豆作品，能明显提升识别准确度；也可「跳过裁剪」。"
+          onConfirm={(cropped) => {
+            setSrc(cropped)
+            setPreview(cropped)
+            setPendingCrop(null)
+          }}
+          onSkip={() => {
+            setSrc(pendingCrop)
+            setPreview(pendingCrop)
+            setPendingCrop(null)
+          }}
+          onCancel={() => {
+            setPendingCrop(null)
+            resetInput()
+          }}
+        />
+      )}
 
       {loading && (
         <div className="rounded-xl bg-paper-100 px-3.5 py-2.5 text-center">
