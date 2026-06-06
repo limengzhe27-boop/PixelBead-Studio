@@ -1,60 +1,64 @@
 'use client'
 
-import { useCallback, useEffect, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { ReactNode } from 'react'
-import Cropper from 'react-easy-crop'
-import type { Area } from 'react-easy-crop'
-import 'react-easy-crop/react-easy-crop.css'
-import { flipDataURL, getCroppedDataURL } from '@/utils/cropImage'
+import ReactCrop, { type Crop } from 'react-image-crop'
+import 'react-image-crop/dist/ReactCrop.css'
+import { bakeUpright, cropToDataURL } from '@/utils/cropImage'
 
 interface Props {
   src: string // 完整 dataURL
   title?: string
   hint?: string
   onConfirm: (croppedDataUrl: string) => void // 确认：返回裁剪后的完整 dataURL
-  onSkip: () => void // 跳过：不裁剪，用原图
+  onSkip: () => void // 跳过：不裁剪，用原图（或已旋转/翻转后的整图）
   onCancel: () => void // 关闭：放弃（重新选图）
 }
 
+const FULL: Crop = { unit: '%', x: 0, y: 0, width: 100, height: 100 }
+
 /**
- * 触控友好的裁剪弹层（react-easy-crop，整块按需懒加载）。
- * 手指拖动移动裁剪、双指捏合缩放；支持旋转 90°、水平/垂直翻转、自由裁、可跳过。
- * 翻转用「预翻转图片」实现，保证预览与输出一致。
+ * 触控友好的裁剪弹层（react-image-crop，整块按需懒加载）。
+ * 交互：照片固定不缩放/不平移；裁剪框初始覆盖整张照片（= 不裁剪），拖角/边缩小、拖框内移动；
+ * 框内保留、框外裁掉；自由比例；可旋转 90° / 水平翻转 / 垂直翻转（作用于照片，先烘焙成新图再裁）；
+ * 「重置」恢复整图；可跳过。EXIF 方向已在 bakeUpright 内校正，手机照片正立显示。
  */
 export default function CropModal({ src, title = '裁剪图片', hint, onConfirm, onSkip, onCancel }: Props) {
-  const [crop, setCrop] = useState({ x: 0, y: 0 })
-  const [zoom, setZoom] = useState(1)
   const [rotation, setRotation] = useState(0)
   const [flipH, setFlipH] = useState(false)
   const [flipV, setFlipV] = useState(false)
-  const [displaySrc, setDisplaySrc] = useState(src)
-  const [area, setArea] = useState<Area | null>(null)
+  const [displaySrc, setDisplaySrc] = useState<string | null>(null)
+  const [crop, setCrop] = useState<Crop>(FULL)
   const [busy, setBusy] = useState(false)
 
-  // 翻转：预翻转图片再喂给 cropper（预览与输出一致；旋转交给 cropper 的 rotation）
+  // 烘焙 EXIF 正立 + 旋转 + 翻转 → 当前显示图；每次变换后裁剪框恢复整图
   useEffect(() => {
     let alive = true
-    flipDataURL(src, flipH, flipV)
-      .then((d) => alive && setDisplaySrc(d))
-      .catch(() => alive && setDisplaySrc(src))
+    bakeUpright(src, rotation, flipH, flipV)
+      .then((d) => {
+        if (!alive) return
+        setDisplaySrc(d)
+        setCrop(FULL)
+      })
+      .catch(() => {
+        if (alive) setDisplaySrc(src)
+      })
     return () => {
       alive = false
     }
-  }, [src, flipH, flipV])
-
-  const onCropComplete = useCallback((_: Area, pixels: Area) => setArea(pixels), [])
+  }, [src, rotation, flipH, flipV])
 
   const confirm = async () => {
-    if (!area) {
-      onSkip()
-      return
-    }
+    if (!displaySrc) return
     setBusy(true)
     try {
-      onConfirm(await getCroppedDataURL(displaySrc, area, rotation))
+      // 框≈整图 / 无效 → 等价于不裁，直接用当前显示图（含旋转/翻转）
+      const full = crop.width >= 99.5 && crop.height >= 99.5 && crop.x <= 0.5 && crop.y <= 0.5
+      const out = full || crop.width <= 0 || crop.height <= 0 ? displaySrc : await cropToDataURL(displaySrc, crop)
+      onConfirm(out)
     } catch {
-      onConfirm(displaySrc) // 裁剪失败兜底：用当前显示图
+      onConfirm(displaySrc)
     } finally {
       setBusy(false)
     }
@@ -64,11 +68,9 @@ export default function CropModal({ src, title = '裁剪图片', hint, onConfirm
     setRotation(0)
     setFlipH(false)
     setFlipV(false)
-    setZoom(1)
-    setCrop({ x: 0, y: 0 })
+    setCrop(FULL)
   }
 
-  // 用 portal 挂到 body：避开首页卡片的 transform/filter 祖先（否则 fixed 会相对该祖先而非视口，弹层盖不满全屏）
   if (typeof document === 'undefined') return null
   return createPortal(
     <div className="fixed inset-0 z-[95] grid grid-rows-[auto_1fr_auto] bg-ink animate-pop-in" style={{ touchAction: 'none' }}>
@@ -80,42 +82,35 @@ export default function CropModal({ src, title = '裁剪图片', hint, onConfirm
         </button>
       </div>
 
-      {/* 裁剪区（react-easy-crop 需要一个有尺寸的相对定位容器） */}
-      <div className="relative bg-ink">
-        <Cropper
-          image={displaySrc}
-          crop={crop}
-          zoom={zoom}
-          rotation={rotation}
-          aspect={undefined}
-          minZoom={1}
-          maxZoom={5}
-          restrictPosition={false}
-          showGrid
-          objectFit="contain"
-          onCropChange={setCrop}
-          onZoomChange={setZoom}
-          onRotationChange={setRotation}
-          onCropComplete={onCropComplete}
-        />
+      {/* 裁剪区：照片固定，仅裁剪框可拖 */}
+      <div className="relative grid min-h-0 place-items-center overflow-hidden bg-ink px-2 py-1">
+        {displaySrc ? (
+          <ReactCrop
+            crop={crop}
+            onChange={(_, percent) => setCrop(percent)}
+            minWidth={28}
+            minHeight={28}
+            keepSelection
+            ruleOfThirds
+            className="max-h-full"
+          >
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={displaySrc}
+              alt="裁剪预览"
+              draggable={false}
+              className="block max-h-[68vh] max-w-full select-none"
+              style={{ maxHeight: '100%' }}
+            />
+          </ReactCrop>
+        ) : (
+          <span className="text-sm text-paper-50/70">载入中…</span>
+        )}
       </div>
 
       {/* 控件 + 按钮（底部留出 iPhone home 条安全区） */}
       <div className="space-y-3 border-t-2 border-ink bg-paper-50 px-4 py-3" style={{ paddingBottom: 'calc(12px + env(safe-area-inset-bottom))' }}>
         {hint && <p className="text-[11px] leading-snug text-ink-faint">{hint}</p>}
-
-        <div className="flex items-center gap-3">
-          <span className="shrink-0 text-xs text-ink-soft">缩放</span>
-          <input
-            type="range"
-            min={1}
-            max={5}
-            step={0.01}
-            value={zoom}
-            onChange={(e) => setZoom(Number(e.target.value))}
-            className="h-2 flex-1 cursor-pointer appearance-none rounded-bead bg-paper-300 accent-coral"
-          />
-        </div>
 
         <div className="flex flex-wrap items-center gap-2">
           <ToolBtn onClick={() => setRotation((r) => (r + 90) % 360)} label="旋转 90°">
@@ -124,12 +119,12 @@ export default function CropModal({ src, title = '裁剪图片', hint, onConfirm
           </ToolBtn>
           <ToolBtn onClick={() => setFlipH((v) => !v)} active={flipH} label="水平翻转">⇋ 水平</ToolBtn>
           <ToolBtn onClick={() => setFlipV((v) => !v)} active={flipV} label="垂直翻转">⇅ 垂直</ToolBtn>
-          <ToolBtn onClick={reset} label="重置">重置</ToolBtn>
+          <ToolBtn onClick={reset} label="重置为整图">重置</ToolBtn>
         </div>
 
         <div className="flex gap-2">
           <button onClick={onSkip} className="btn-ghost min-h-[44px] flex-1 justify-center py-2 text-sm">跳过裁剪</button>
-          <button onClick={confirm} disabled={busy} className="btn-cta min-h-[44px] flex-[2] justify-center py-2 text-sm">
+          <button onClick={confirm} disabled={busy || !displaySrc} className="btn-cta min-h-[44px] flex-[2] justify-center py-2 text-sm">
             {busy ? '裁剪中…' : '确认裁剪'}
           </button>
         </div>

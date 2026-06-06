@@ -1,69 +1,81 @@
 import { loadImage } from './imageProcessor'
 
-export interface PixelArea {
+export interface PercentArea {
   x: number
   y: number
   width: number
   height: number
 }
 
-/**
- * 按 flipH/flipV 预翻转图片，返回新的完整 dataURL（都不翻转则原样返回）。
- * 让裁剪框的「预览」与「输出」用同一张翻转后的图，避免翻转预览与 react-easy-crop 自带 transform 打架。
- */
-export async function flipDataURL(src: string, flipH: boolean, flipV: boolean): Promise<string> {
-  if (!flipH && !flipV) return src
-  const image = await loadImage(src)
-  const w = image.naturalWidth || image.width
-  const h = image.naturalHeight || image.height
-  const canvas = document.createElement('canvas')
-  canvas.width = w
-  canvas.height = h
-  const ctx = canvas.getContext('2d')
-  if (!ctx) return src
-  ctx.translate(flipH ? w : 0, flipV ? h : 0)
-  ctx.scale(flipH ? -1 : 1, flipV ? -1 : 1)
-  ctx.drawImage(image, 0, 0)
-  return canvas.toDataURL('image/png')
+function mimeOf(src: string): string {
+  // PNG 保留透明；其余（照片）用 JPEG，避免大图 PNG dataURL 占用过多内存
+  return /^data:image\/png/i.test(src) ? 'image/png' : 'image/jpeg'
 }
 
 /**
- * 按 react-easy-crop 的 croppedAreaPixels(+rotation) 裁出区域，返回完整 dataURL。
- * 先把原图按 rotation 画到「旋转后包围盒」画布，再从中切出 pixelCrop 区域（与 react-easy-crop 坐标系一致）。
+ * 取「EXIF 校正后正立」的位图。手机照片常带 EXIF 旋转信息，直接画到 canvas 会横躺/倒置，
+ * 用 createImageBitmap(..., { imageOrientation: 'from-image' }) 让其正立。
+ * 不支持时退回普通 <img>（无 EXIF 校正，但用户可用旋转按钮手动纠正兜底）。
  */
-export async function getCroppedDataURL(src: string, pixelCrop: PixelArea, rotation = 0): Promise<string> {
-  const image = await loadImage(src)
-  const w = image.naturalWidth || image.width
-  const h = image.naturalHeight || image.height
-  const rad = (rotation * Math.PI) / 180
+async function getUpright(src: string): Promise<ImageBitmap | HTMLImageElement> {
+  try {
+    const blob = await (await fetch(src)).blob()
+    return await createImageBitmap(blob, { imageOrientation: 'from-image' })
+  } catch {
+    return loadImage(src)
+  }
+}
 
-  const bboxW = Math.abs(Math.cos(rad) * w) + Math.abs(Math.sin(rad) * h)
-  const bboxH = Math.abs(Math.sin(rad) * w) + Math.abs(Math.cos(rad) * h)
+function dimsOf(img: ImageBitmap | HTMLImageElement): { w: number; h: number } {
+  const w = (img as HTMLImageElement).naturalWidth || img.width
+  const h = (img as HTMLImageElement).naturalHeight || img.height
+  return { w, h }
+}
 
-  const tmp = document.createElement('canvas')
-  tmp.width = Math.max(1, Math.round(bboxW))
-  tmp.height = Math.max(1, Math.round(bboxH))
-  const tctx = tmp.getContext('2d')
-  if (!tctx) return src
-  tctx.translate(tmp.width / 2, tmp.height / 2)
-  tctx.rotate(rad)
-  tctx.drawImage(image, -w / 2, -h / 2)
+/**
+ * 把「EXIF 正立图 + 旋转(90°步进) + 翻转」烘焙成一张正向显示的新图（dataURL）。
+ * 关键：旋转/翻转不是 CSS 显示变换，而是真实重画成新图——裁剪框始终对「当前这张正向图」操作，
+ * 框与图永远对得上，不会裁错或变形。
+ */
+export async function bakeUpright(src: string, rotation: number, flipH: boolean, flipV: boolean): Promise<string> {
+  const img = await getUpright(src)
+  const { w, h } = dimsOf(img)
+  const norm = (((rotation % 360) + 360) % 360)
+  const rad = norm * (Math.PI / 180)
+  const swap = norm % 180 !== 0
+  const cw = Math.max(1, swap ? h : w)
+  const ch = Math.max(1, swap ? w : h)
+  const canvas = document.createElement('canvas')
+  canvas.width = cw
+  canvas.height = ch
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return src
+  ctx.translate(cw / 2, ch / 2)
+  ctx.rotate(rad)
+  ctx.scale(flipH ? -1 : 1, flipV ? -1 : 1)
+  ctx.drawImage(img as CanvasImageSource, -w / 2, -h / 2)
+  ;(img as ImageBitmap).close?.()
+  return canvas.toDataURL(mimeOf(src), 0.92)
+}
 
-  const out = document.createElement('canvas')
-  out.width = Math.max(1, Math.round(pixelCrop.width))
-  out.height = Math.max(1, Math.round(pixelCrop.height))
-  const octx = out.getContext('2d')
-  if (!octx) return src
-  octx.drawImage(
-    tmp,
-    pixelCrop.x,
-    pixelCrop.y,
-    pixelCrop.width,
-    pixelCrop.height,
-    0,
-    0,
-    out.width,
-    out.height,
-  )
-  return out.toDataURL('image/png')
+/**
+ * 按百分比裁剪框在「原图分辨率」上裁出区域，返回完整 dataURL。
+ * react-image-crop 给的坐标是屏幕显示像素，手机上图是缩小显示的；用百分比 × naturalWidth
+ * 换算回原图分辨率再裁，保证清晰（不是屏幕低清图）。
+ */
+export async function cropToDataURL(displaySrc: string, crop: PercentArea): Promise<string> {
+  const img = await loadImage(displaySrc)
+  const nw = img.naturalWidth || img.width
+  const nh = img.naturalHeight || img.height
+  const x = Math.max(0, Math.round((crop.x / 100) * nw))
+  const y = Math.max(0, Math.round((crop.y / 100) * nh))
+  const cw = Math.max(1, Math.round((crop.width / 100) * nw))
+  const ch = Math.max(1, Math.round((crop.height / 100) * nh))
+  const canvas = document.createElement('canvas')
+  canvas.width = cw
+  canvas.height = ch
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return displaySrc
+  ctx.drawImage(img, x, y, cw, ch, 0, 0, cw, ch)
+  return canvas.toDataURL(mimeOf(displaySrc), 0.92)
 }
