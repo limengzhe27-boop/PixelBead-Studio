@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { ReactNode } from 'react'
 import ReactCrop, { type Crop } from 'react-image-crop'
@@ -31,6 +31,24 @@ export default function CropModal({ src, title = '裁剪图片', hint, onConfirm
   const [displaySrc, setDisplaySrc] = useState<string | null>(null)
   const [crop, setCrop] = useState<Crop>(FULL)
   const [busy, setBusy] = useState(false)
+
+  // 测量裁剪区可用尺寸 → 以「像素」约束 .ReactCrop 的 max-width/height（库的 max-height:inherit
+  // 链传的是百分比，对 auto 高度父级无效，必须给确切像素，整张图才会缩放装进按钮上方一屏）
+  const areaRef = useRef<HTMLDivElement>(null)
+  const [area, setArea] = useState({ w: 0, h: 0 })
+  useEffect(() => {
+    const el = areaRef.current
+    if (!el) return
+    const update = () => setArea({ w: el.clientWidth, h: el.clientHeight })
+    update()
+    const ro = new ResizeObserver(update)
+    ro.observe(el)
+    window.addEventListener('resize', update)
+    return () => {
+      ro.disconnect()
+      window.removeEventListener('resize', update)
+    }
+  }, [])
 
   // 烘焙 EXIF 正立 + 旋转 + 翻转 → 当前显示图；每次变换后裁剪框恢复整图
   useEffect(() => {
@@ -73,18 +91,19 @@ export default function CropModal({ src, title = '裁剪图片', hint, onConfirm
 
   if (typeof document === 'undefined') return null
   return createPortal(
-    <div className="fixed inset-0 z-[95] grid grid-rows-[auto_1fr_auto] bg-ink animate-pop-in" style={{ touchAction: 'none' }}>
-      {/* 顶部 */}
-      <div className="flex items-center justify-between px-4 py-3 text-paper-50">
+    // ★ 用 100dvh（动态视口高度）+ flex 纵向：上图下钮，整张图缩放装进按钮上方一屏看全，不靠滚动
+    <div className="fixed inset-x-0 top-0 z-[95] flex h-[100dvh] flex-col bg-ink animate-pop-in" style={{ touchAction: 'none' }}>
+      {/* 顶部（紧凑） */}
+      <div className="flex shrink-0 items-center justify-between px-4 py-2 text-paper-50">
         <span className="text-sm font-bold">{title}</span>
         <button onClick={onCancel} aria-label="关闭" className="grid h-9 w-9 place-items-center rounded-lg text-paper-50 hover:bg-white/10">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M18 6 6 18M6 6l12 12" /></svg>
         </button>
       </div>
 
-      {/* 裁剪区：照片固定，仅裁剪框可拖 */}
-      <div className="relative grid min-h-0 place-items-center overflow-hidden bg-ink px-2 py-1">
-        {displaySrc ? (
+      {/* 裁剪区：占满剩余空间，整张图缩放装进去（min-h-0 让 flex 子项能收缩，关键） */}
+      <div ref={areaRef} className="grid min-h-0 flex-1 place-items-center overflow-hidden bg-ink">
+        {displaySrc && area.h > 0 ? (
           <ReactCrop
             crop={crop}
             onChange={(_, percent) => setCrop(percent)}
@@ -92,24 +111,20 @@ export default function CropModal({ src, title = '裁剪图片', hint, onConfirm
             minHeight={28}
             keepSelection
             ruleOfThirds
-            className="max-h-full"
+            // 用确切像素约束：库 CSS 的 max-height:inherit 会把这个像素值传到内部 <img>，整张图随之缩放装进可视区。
+            // 再各留 ~20px 余量：裁剪手柄会从框边缘外探出半个身位（手机手柄 30px），避免下/上边手柄探到按钮或标题后面。
+            style={{ maxHeight: area.h - 40, maxWidth: area.w - 40 }}
           >
             {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img
-              src={displaySrc}
-              alt="裁剪预览"
-              draggable={false}
-              className="block max-h-[68vh] max-w-full select-none"
-              style={{ maxHeight: '100%' }}
-            />
+            <img src={displaySrc} alt="裁剪预览" draggable={false} className="block select-none" />
           </ReactCrop>
         ) : (
           <span className="text-sm text-paper-50/70">载入中…</span>
         )}
       </div>
 
-      {/* 控件 + 按钮（底部留出 iPhone home 条安全区） */}
-      <div className="space-y-3 border-t-2 border-ink bg-paper-50 px-4 py-3" style={{ paddingBottom: 'calc(12px + env(safe-area-inset-bottom))' }}>
+      {/* 控件 + 按钮：图片下方正常流，不浮在图上；紧凑；底部留 iPhone home 条安全区 */}
+      <div className="shrink-0 space-y-2 border-t-2 border-ink bg-paper-50 px-4 pt-2.5" style={{ paddingBottom: 'calc(10px + env(safe-area-inset-bottom))' }}>
         {hint && <p className="text-[11px] leading-snug text-ink-faint">{hint}</p>}
 
         <div className="flex flex-wrap items-center gap-2">
